@@ -98,6 +98,19 @@ still assigns a `DOC_ID` and records the file in the manifest with
 python .\pack_project.py .\source_files --target chatgpt --mode balanced
 ```
 
+The CLI calls the same backend function future UI adapters should use:
+
+```python
+from packer import run_packaging_job
+
+result = run_packaging_job(
+    source_dir="./source_files",
+    output_dir="./llm_project_exports",
+    target="chatgpt",
+    mode="balanced",
+)
+```
+
 Arguments:
 
 | Argument | Description |

@@ -10,7 +10,12 @@
       "Bash(pip install *)",
       "Bash(python -c \"import pandas, openpyxl; print\\('pandas', pandas.__version__\\); print\\('openpyxl', openpyxl.__version__\\)\")",
       "Bash(python pack_project.py \"../sample_input\" --target chatgpt --mode balanced --output \"../sample_output\")",
-      "Bash(python pack_project.py \"../sample_input\" --target rag --mode balanced --output \"../sample_output\")"
+      "Bash(python pack_project.py \"../sample_input\" --target rag --mode balanced --output \"../sample_output\")",
+      "Bash(python pack_project.py ./sample_input --target chatgpt --mode lean --output ./test_output)",
+      "Bash(rm \"sample_input/notes/sketch.xyz\")",
+      "Bash(git -c core.quotepath=off status --short)",
+      "Bash(python -m unittest discover -s tests -v)",
+      "Bash(python pack_project.py ./sample_input --target chatgpt --mode balanced --output ./test_output)"
     ]
   }
 }

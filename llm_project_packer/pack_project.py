@@ -8,29 +8,17 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import Tuple
 
 from packer import presets
-from packer.bundler import (
-    ConvertedDoc,
-    make_converted_doc,
-    split_into_bundles,
-    write_bundle,
-)
 from packer.config import PackerConfig
-from packer.exporters import (
-    InstructionContext,
-    assign_bundles_to_manifest,
-    write_instructions,
-    write_rag_export,
+from packer.pipeline import (
+    PackResult,
+    ProgressEvent,
+    run_packaging_config,
+    run_packaging_job,
 )
-from packer.manifest import Manifest, ManifestEntry
-from packer.markdown_utils import doc_id_for_index, safe_filename
-from packer.readers import ReaderContext, read_file
-from packer.scanner import scan_directory
-from packer.token_estimator import estimate_tokens, estimator_backend
 
 
 # ---------------------------------------------------------------------------
@@ -141,159 +129,24 @@ def build_config_from_args(args: argparse.Namespace) -> PackerConfig:
     return cfg
 
 
-def _path_is_relative_to(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 
 
+def _print_progress(event: ProgressEvent) -> None:
+    print(event.message)
+
+
 def run(cfg: PackerConfig) -> Path:
     """Execute one packing run end-to-end and return the export directory path."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    export_name = safe_filename(
-        f"{cfg.project_name}_{cfg.target}_{cfg.mode}_{timestamp}"
-    )
-    export_dir = cfg.output_dir / export_name
-    assets_dir = export_dir / "assets"
-    data_dir = export_dir / "data"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
+    result = run_job(cfg)
+    return result.export_dir
 
-    print(f"llm_project_packer v1")
-    print(f"  Source:    {cfg.source_dir}")
-    print(f"  Output:    {export_dir}")
-    print(f"  Target:    {cfg.target}")
-    print(f"  Mode:      {cfg.mode}")
-    print(f"  Budget:    {cfg.max_bundle_tokens:,} tokens / bundle")
-    print(f"  Estimator: {estimator_backend()}")
-    print()
 
-    print("Scanning files...")
-    scan_exclude_dirs = set(cfg.exclude_dirs)
-    if _path_is_relative_to(cfg.output_dir, cfg.source_dir):
-        scan_exclude_dirs.add(cfg.output_dir.name)
-        print(f"  Skipping output directory during scan: {cfg.output_dir.name}")
-    files = scan_directory(
-        source_dir=cfg.source_dir,
-        include_extensions=cfg.include_extensions,
-        exclude_dirs=tuple(scan_exclude_dirs),
-    )
-    print(f"  Found {len(files)} files to record/process.")
-    if not files:
-        print("No matching files found. Nothing to do.")
-        return export_dir
-
-    manifest = Manifest(
-        project_name=cfg.project_name,
-        target=cfg.target,
-        mode=cfg.mode,
-    )
-    reader_ctx = ReaderContext(
-        source_root=cfg.source_dir,
-        assets_dir=assets_dir,
-        data_dir=data_dir,
-    )
-
-    converted_docs: List[ConvertedDoc] = []
-
-    for index, scanned in enumerate(files, start=1):
-        doc_id = doc_id_for_index(index)
-        rel_str = scanned.relative_path.as_posix()
-        print(f"  Processing {doc_id} {rel_str}...")
-        result = read_file(scanned, doc_id=doc_id, ctx=reader_ctx)
-
-        entry = ManifestEntry(
-            doc_id=doc_id,
-            source_file=scanned.relative_path.name,
-            source_path=rel_str,
-            original_extension=scanned.extension,
-            file_type=scanned.file_type,
-            status=result.status,
-            char_count=result.char_count,
-            word_count=result.word_count,
-            notes=result.notes,
-        )
-
-        if result.status == "ok" and result.markdown.strip():
-            doc = make_converted_doc(entry, result.markdown)
-            entry.token_estimate = doc.token_estimate
-            converted_docs.append(doc)
-            print(
-                f"    Extracted {result.char_count:,} chars / "
-                f"{doc.token_estimate:,} tokens."
-            )
-        elif result.status == "ok":
-            # ok but empty body — still counts as present, just nothing to bundle.
-            entry.token_estimate = estimate_tokens(result.markdown)
-            print("    Reader returned no content; recorded in manifest only.")
-        elif result.status == "skipped":
-            print(f"    Skipped: {result.notes}")
-        else:
-            print(f"    FAILED: {result.notes}")
-
-        manifest.add(entry)
-
-    # ----- Bundle (skip for rag target; rag uses chunks instead) -----
-    bundle_filenames: List[str] = []
-    if cfg.target != "rag":
-        print("\nBundling documents...")
-        bundles = split_into_bundles(converted_docs, cfg.max_bundle_tokens)
-        print(f"  Created {len(bundles)} bundles.")
-        for bundle in bundles:
-            path = write_bundle(
-                bundle,
-                output_dir=export_dir,
-                project_name=cfg.project_name,
-                target=cfg.target,
-                mode=cfg.mode,
-                max_bundle_tokens=cfg.max_bundle_tokens,
-                total_bundles=len(bundles),
-            )
-            bundle_filenames.append(path.name)
-            print(
-                f"  Wrote {path.name} ({bundle.total_tokens:,} tokens, "
-                f"{len(bundle.docs)} docs)."
-            )
-        assign_bundles_to_manifest(manifest, bundles)
-    else:
-        print("\nTarget is 'rag'; skipping Markdown bundling.")
-        rag_dir = export_dir / "rag_ready"
-        write_rag_export(
-            rag_dir,
-            converted_docs=converted_docs,
-            max_chunk_tokens=cfg.max_bundle_tokens,
-        )
-        print(f"  Wrote RAG chunks to {rag_dir}.")
-
-    # ----- Manifest files -----
-    print("\nWriting manifest...")
-    manifest.write_markdown(export_dir / "01_SOURCE_MANIFEST.md")
-    manifest.write_csv(export_dir / "manifest.csv")
-    manifest.write_json(export_dir / "manifest.json")
-
-    # ----- Instruction files -----
-    instruction_ctx = InstructionContext(
-        project_name=cfg.project_name,
-        target=cfg.target,
-        mode=cfg.mode,
-        bundle_filenames=bundle_filenames,
-        total_documents=len(manifest.entries),
-        total_tokens=sum(e.token_estimate for e in manifest.entries),
-        max_bundle_tokens=cfg.max_bundle_tokens,
-    )
-    instruction_path = write_instructions(cfg.target, export_dir, instruction_ctx)
-    print(f"  Wrote {instruction_path.name}.")
-
-    print(f"\nExport complete: {export_dir}")
-    return export_dir
+def run_job(cfg: PackerConfig) -> PackResult:
+    """Execute one packing run and return a structured result."""
+    return run_packaging_config(cfg, progress_callback=_print_progress)
 
 
 def main(argv=None) -> int:

@@ -4,3 +4,11 @@ or simple RAG workflows.
 """
 
 __version__ = "1.0.0"
+
+from .pipeline import PackResult, ProgressEvent, run_packaging_job
+
+__all__ = [
+    "PackResult",
+    "ProgressEvent",
+    "run_packaging_job",
+]
