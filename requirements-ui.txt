@@ -1,0 +1,7 @@
+# Optional UI dependencies. Install only when running the Streamlit skeleton:
+#
+#     pip install -r requirements-ui.txt
+#     streamlit run streamlit_app.py
+#
+# The CLI (pack_project.py) does NOT depend on Streamlit.
+streamlit>=1.30

@@ -1,0 +1,1215 @@
+"""Streamlit UI for llm_project_packer.
+
+Run with::
+
+    pip install -r requirements-ui.txt
+    streamlit run streamlit_app.py
+
+The UI lets the user load and save profiles, scan a source folder, review
+included files, preview the planned bundle shape, and create local export
+folders through the shared backend. The CLI (``pack_project.py``) is unchanged.
+"""
+
+from __future__ import annotations
+
+import inspect
+import sys
+import tempfile
+from collections import Counter, defaultdict
+from hashlib import sha1
+from pathlib import Path
+from typing import Dict, Iterable, List, Sequence, Tuple
+
+REPO_ROOT = Path(__file__).resolve().parent
+PACKER_PARENT = REPO_ROOT / "llm_project_packer"
+if str(PACKER_PARENT) not in sys.path:
+    sys.path.insert(0, str(PACKER_PARENT))
+
+import streamlit as st  # noqa: E402
+
+from packer import presets  # noqa: E402
+from packer.exporters import InstructionContext, write_instructions  # noqa: E402
+from packer.markdown_utils import safe_filename  # noqa: E402
+from packer.pipeline import PackResult, ProgressEvent, run_packaging_job  # noqa: E402
+from packer.profiles import (  # noqa: E402
+    Profile,
+    delete_profile,
+    get_built_in_profile,
+    list_built_in_profiles,
+    list_profiles,
+    load_profile,
+    save_profile,
+)
+from packer.scanner import ScannedFile, scan_directory  # noqa: E402
+
+
+PAGE_TITLE = "llm_project_packer"
+SESSION_KEY_PROFILE = "current_profile"
+SESSION_KEY_LAST_LOADED = "last_loaded_label"
+SESSION_KEY_GEN = "form_generation"
+SESSION_KEY_SCAN_CACHE = "scan_cache"
+SESSION_KEY_FILE_SELECTIONS = "file_review_selections"
+SESSION_KEY_FILE_SELECTION_REVISIONS = "file_review_selection_revisions"
+SESSION_KEY_LAST_EXPORT_RESULT = "last_export_result"
+BUNDLE_SEPARATOR_OPTIONS = ("comment", "rule", "blank")
+FILE_TYPE_ORDER = ("text", "html", "pdf", "docx", "csv", "xlsx", "image", "unsupported")
+
+
+# ---------------------------------------------------------------------------
+# Session state helpers
+# ---------------------------------------------------------------------------
+
+
+def _new_blank_profile() -> Profile:
+    return Profile(profile_name="Untitled profile")
+
+
+def _ensure_session_state() -> None:
+    """Initialize session keys exactly once per browser session."""
+    if SESSION_KEY_PROFILE not in st.session_state:
+        st.session_state[SESSION_KEY_PROFILE] = _new_blank_profile()
+    if SESSION_KEY_LAST_LOADED not in st.session_state:
+        st.session_state[SESSION_KEY_LAST_LOADED] = "(blank)"
+    if SESSION_KEY_GEN not in st.session_state:
+        st.session_state[SESSION_KEY_GEN] = 0
+    if SESSION_KEY_SCAN_CACHE not in st.session_state:
+        st.session_state[SESSION_KEY_SCAN_CACHE] = {}
+    if SESSION_KEY_FILE_SELECTIONS not in st.session_state:
+        st.session_state[SESSION_KEY_FILE_SELECTIONS] = {}
+    if SESSION_KEY_FILE_SELECTION_REVISIONS not in st.session_state:
+        st.session_state[SESSION_KEY_FILE_SELECTION_REVISIONS] = {}
+    if SESSION_KEY_LAST_EXPORT_RESULT not in st.session_state:
+        st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = None
+
+
+def _set_profile(profile: Profile, label: str) -> None:
+    """Replace the current profile and bump the form generation counter.
+
+    Bumping the counter changes every widget key, which forces Streamlit to
+    re-render with the freshly loaded profile values instead of holding onto
+    stale user-typed widget state.
+    """
+    st.session_state[SESSION_KEY_PROFILE] = profile
+    st.session_state[SESSION_KEY_LAST_LOADED] = label
+    st.session_state[SESSION_KEY_GEN] += 1
+
+
+def _profile() -> Profile:
+    return st.session_state[SESSION_KEY_PROFILE]
+
+
+def _gen() -> int:
+    return st.session_state[SESSION_KEY_GEN]
+
+
+def _key(name: str) -> str:
+    return f"{name}__g{_gen()}"
+
+
+# ---------------------------------------------------------------------------
+# Small formatting helpers
+# ---------------------------------------------------------------------------
+
+
+def _csv_to_list(value: str) -> List[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _list_to_csv(values: List[str]) -> str:
+    return ", ".join(values)
+
+
+def _safe_index(options: List[str], value: str, default: int = 0) -> int:
+    return options.index(value) if value in options else default
+
+
+def _dataframe_layout_kwargs() -> Dict[str, object]:
+    if "width" in inspect.signature(st.dataframe).parameters:
+        return {"width": "stretch"}
+    return {"use_container_width": True}
+
+
+def _normalized_extensions(values: Iterable[str]) -> Tuple[str, ...]:
+    normalized = []
+    for value in values:
+        item = value.strip().lower()
+        if not item:
+            continue
+        normalized.append(item if item.startswith(".") else f".{item}")
+    return tuple(sorted(dict.fromkeys(normalized)))
+
+
+def _resolved_include_extensions(profile: Profile) -> Tuple[str, ...]:
+    return _normalized_extensions(
+        profile.include_extensions or presets.DEFAULT_INCLUDE_EXTENSIONS
+    )
+
+
+def _resolved_exclude_dirs(profile: Profile) -> Tuple[str, ...]:
+    merged = list(presets.DEFAULT_EXCLUDE_DIRS) + list(profile.exclude_dirs)
+    return tuple(sorted(dict.fromkeys(item for item in merged if item)))
+
+
+def _scan_cache_key(
+    source_dir: Path,
+    include_extensions: Sequence[str],
+    exclude_dirs: Sequence[str],
+) -> Tuple[str, Tuple[str, ...], Tuple[str, ...]]:
+    return (str(source_dir.resolve()), tuple(include_extensions), tuple(exclude_dirs))
+
+
+def _scan_key_id(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> str:
+    return sha1(repr(key).encode("utf-8")).hexdigest()[:12]
+
+
+def _format_size(num_bytes: int) -> str:
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    value = float(num_bytes)
+    for unit in ("KB", "MB", "GB"):
+        value /= 1024.0
+        if value < 1024.0:
+            return f"{value:.1f} {unit}"
+    return f"{value / 1024.0:.1f} TB"
+
+
+def _is_supported(scanned: ScannedFile) -> bool:
+    return scanned.file_type != "unsupported"
+
+
+def _count_by_file_type(files: Sequence[ScannedFile]) -> Dict[str, int]:
+    counter = Counter(presets.classify_extension(f.extension) for f in files)
+    return {file_type: counter.get(file_type, 0) for file_type in FILE_TYPE_ORDER}
+
+
+def _duplicate_filename_groups(files: Sequence[ScannedFile]) -> Dict[str, List[str]]:
+    by_name: Dict[str, List[str]] = defaultdict(list)
+    for scanned in files:
+        by_name[scanned.relative_path.name.lower()].append(str(scanned.relative_path))
+    return {
+        basename: sorted(paths)
+        for basename, paths in sorted(by_name.items())
+        if len(paths) >= 2
+    }
+
+
+def _files_table(files: Sequence[ScannedFile]) -> List[Dict[str, object]]:
+    return [
+        {
+            "relative_path": str(scanned.relative_path),
+            "file_type": scanned.file_type,
+            "extension": scanned.extension,
+            "size_bytes": scanned.size_bytes,
+            "will_process": _is_supported(scanned),
+        }
+        for scanned in files
+    ]
+
+
+def _selection_store_key(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> str:
+    return repr(key)
+
+
+def _reconcile_file_selections(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+) -> Dict[str, bool]:
+    store = st.session_state[SESSION_KEY_FILE_SELECTIONS]
+    store_key = _selection_store_key(key)
+    previous = store.get(store_key, {})
+    current = {
+        str(scanned.relative_path): bool(
+            previous.get(str(scanned.relative_path), _is_supported(scanned))
+        )
+        for scanned in files
+    }
+    store[store_key] = current
+    return current
+
+
+def _selection_revision(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> int:
+    revisions = st.session_state[SESSION_KEY_FILE_SELECTION_REVISIONS]
+    return int(revisions.get(_selection_store_key(key), 0))
+
+
+def _bump_selection_revision(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> None:
+    revisions = st.session_state[SESSION_KEY_FILE_SELECTION_REVISIONS]
+    store_key = _selection_store_key(key)
+    revisions[store_key] = int(revisions.get(store_key, 0)) + 1
+
+
+def _record_path(record: Dict[str, object]) -> str:
+    return str(record.get("relative_path", ""))
+
+
+def _editor_records(value: object) -> List[Dict[str, object]]:
+    if hasattr(value, "to_dict"):
+        return value.to_dict("records")  # type: ignore[no-any-return, attr-defined]
+    return list(value)  # type: ignore[arg-type]
+
+
+def _file_review_status(scanned: ScannedFile, included: bool) -> Tuple[str, str]:
+    if scanned.file_type == "unsupported":
+        return (
+            "unsupported",
+            "Unsupported extension; visible for review and excluded by default.",
+        )
+    if included:
+        return ("included", "Supported file selected for later packaging.")
+    return ("excluded", "Supported file excluded by current review selection.")
+
+
+def _review_rows(
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> List[Dict[str, object]]:
+    rows = []
+    for scanned in files:
+        relative_path = str(scanned.relative_path)
+        included = bool(selections.get(relative_path, _is_supported(scanned)))
+        status, notes = _file_review_status(scanned, included)
+        rows.append(
+            {
+                "include": included,
+                "file_name": scanned.relative_path.name,
+                "relative_path": relative_path,
+                "extension": scanned.extension or "(none)",
+                "file_type": scanned.file_type,
+                "size": _format_size(scanned.size_bytes),
+                "size_bytes": scanned.size_bytes,
+                "status": status,
+                "notes": notes,
+            }
+        )
+    return rows
+
+
+def _filter_review_files(
+    files: Sequence[ScannedFile],
+    search_text: str,
+    extensions: Sequence[str],
+) -> List[ScannedFile]:
+    search = search_text.strip().lower()
+    extension_set = set(extensions)
+    visible = []
+    for scanned in files:
+        extension = scanned.extension or "(none)"
+        if extension_set and extension not in extension_set:
+            continue
+        if search:
+            relative_path = str(scanned.relative_path).lower()
+            file_name = scanned.relative_path.name.lower()
+            if search not in relative_path and search not in file_name:
+                continue
+        visible.append(scanned)
+    return visible
+
+
+def _resolved_source_path(profile: Profile) -> Path:
+    return Path(profile.default_source_folder.strip()).expanduser()
+
+
+def _resolved_output_path(profile: Profile) -> Path:
+    output = profile.default_output_folder.strip() or "./llm_project_exports"
+    return Path(output).expanduser()
+
+
+def _resolved_project_name(profile: Profile, source_dir: Path) -> str:
+    return profile.project_name.strip() or source_dir.name or "project"
+
+
+def _resolved_max_bundle_tokens(profile: Profile) -> int:
+    return profile.max_bundle_tokens or presets.get_bundle_token_budget(
+        profile.target,
+        profile.mode,
+    )
+
+
+def _included_paths(
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> List[str]:
+    return [
+        str(scanned.relative_path)
+        for scanned in files
+        if selections.get(str(scanned.relative_path), _is_supported(scanned))
+    ]
+
+
+def _selected_files(
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> List[ScannedFile]:
+    wanted = set(_included_paths(files, selections))
+    return [scanned for scanned in files if str(scanned.relative_path) in wanted]
+
+
+def _rough_token_estimate(files: Sequence[ScannedFile]) -> int:
+    supported = [scanned for scanned in files if _is_supported(scanned)]
+    return sum(max(1, scanned.size_bytes // 4) for scanned in supported)
+
+
+def _rough_bundle_count(
+    files: Sequence[ScannedFile],
+    target: str,
+    max_bundle_tokens: int,
+) -> int | None:
+    if target == "rag":
+        return None
+    supported = [scanned for scanned in files if _is_supported(scanned)]
+    if not supported:
+        return 0
+    count = 1
+    running = 0
+    for scanned in supported:
+        tokens = max(1, scanned.size_bytes // 4)
+        if running and running + tokens > max_bundle_tokens:
+            count += 1
+            running = tokens
+        else:
+            running += tokens
+    return count
+
+
+def _planned_export_folder_name(profile: Profile) -> str:
+    source_dir = _resolved_source_path(profile)
+    project_name = _resolved_project_name(profile, source_dir)
+    return safe_filename(
+        f"{project_name}_{profile.target}_{profile.mode}_YYYYMMDD_HHMMSS"
+    )
+
+
+def _estimated_bundle_filenames(bundle_count: int | None) -> List[str]:
+    if bundle_count is None:
+        return []
+    return [f"{index + 1:02d}_BUNDLE_{index:03d}.md" for index in range(1, bundle_count + 1)]
+
+
+def _instruction_preview(
+    profile: Profile,
+    selected_files: Sequence[ScannedFile],
+    bundle_count: int | None,
+    max_bundle_tokens: int,
+) -> Tuple[str, List[str]]:
+    warnings: List[str] = []
+    source_dir = _resolved_source_path(profile)
+    project_name = _resolved_project_name(profile, source_dir)
+    total_tokens = _rough_token_estimate(selected_files)
+    bundle_filenames = _estimated_bundle_filenames(bundle_count)
+    ctx = InstructionContext(
+        project_name=project_name,
+        target=profile.target,
+        mode=profile.mode,
+        bundle_filenames=bundle_filenames,
+        total_documents=len(selected_files),
+        total_tokens=total_tokens,
+        max_bundle_tokens=max_bundle_tokens,
+    )
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = write_instructions(profile.target, Path(tmp_dir), ctx)
+            return path.read_text(encoding="utf-8"), warnings
+    except Exception as exc:  # noqa: BLE001 - preview should not block export
+        warnings.append(f"Instruction preview could not be generated: {exc}")
+        return "", warnings
+
+
+def _preview_warnings(
+    profile: Profile,
+    files: Sequence[ScannedFile],
+    selected_files: Sequence[ScannedFile],
+) -> List[str]:
+    warnings: List[str] = []
+    if not selected_files:
+        warnings.append("No files are included. Export will have nothing to process.")
+    unsupported_selected = [
+        str(scanned.relative_path)
+        for scanned in selected_files
+        if not _is_supported(scanned)
+    ]
+    if unsupported_selected:
+        warnings.append(
+            f"{len(unsupported_selected)} included file(s) have unsupported extensions "
+            "and will be recorded as skipped."
+        )
+    excluded_count = len(files) - len(selected_files)
+    if excluded_count:
+        warnings.append(
+            f"{excluded_count} discovered file(s) are excluded and will not be written "
+            "to the manifest for this export."
+        )
+    source_dir = _resolved_source_path(profile).resolve()
+    output_dir = _resolved_output_path(profile).resolve()
+    try:
+        output_dir.relative_to(source_dir)
+        warnings.append(
+            "The output folder is inside the source folder; the backend will skip "
+            "that output directory during scan."
+        )
+    except ValueError:
+        pass
+    warnings.append(
+        "Preview bundle counts use a quick size-based token estimate. The final "
+        "export may differ after conversion."
+    )
+    return warnings
+
+
+def _generated_file_rows(export_dir: Path) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    if not export_dir.exists():
+        return rows
+    for path in sorted(export_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        rows.append(
+            {
+                "file": str(path.relative_to(export_dir)),
+                "size": _format_size(size),
+                "size_bytes": size,
+            }
+        )
+    return rows
+
+
+def _manual_upload_instructions(target: str, result: PackResult) -> List[str]:
+    instruction_name = result.instruction_path.name if result.instruction_path else "00_*"
+    if target == "chatgpt":
+        return [
+            "Create or open a ChatGPT Project.",
+            "Upload the source manifest, generated Markdown bundles, and any needed files from assets/ and data/.",
+            f"Open {instruction_name} and paste its instruction block into the project instructions.",
+            "Upload is manual; this app does not connect to ChatGPT.",
+        ]
+    if target == "claude":
+        return [
+            "Create or open a Claude Project.",
+            "Add the exported bundles, manifest, and any needed assets/data files to Project Knowledge.",
+            f"Open {instruction_name} and paste its custom-instructions block into Claude's project instructions.",
+            "Upload is manual; this app does not connect to Claude.",
+        ]
+    if target == "rag":
+        return [
+            "Use manifest.json or manifest.csv as the source index.",
+            "Use rag_ready/chunks.jsonl as the chunk file for your local/API retrieval workflow.",
+            "Use rag_ready/source_map.json to map source documents to chunk IDs.",
+            "This app does not create embeddings or upload data anywhere.",
+        ]
+    return [
+        "Upload or paste 01_SOURCE_MANIFEST.md first so the model has the source index.",
+        "Upload or paste each generated 02_BUNDLE_*.md file in order.",
+        f"Use the prompt in {instruction_name} before asking questions.",
+        "Upload is manual; this app does not connect to any LLM provider.",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Sidebar
+# ---------------------------------------------------------------------------
+
+
+def _render_sidebar() -> None:
+    with st.sidebar:
+        st.header("Profile")
+        st.caption(f"Currently loaded: {st.session_state[SESSION_KEY_LAST_LOADED]}")
+
+        st.subheader("Built-in templates")
+        builtin_names = list_built_in_profiles()
+        chosen_builtin = st.selectbox(
+            "Pick a built-in to load",
+            options=["(none)"] + builtin_names,
+            key="builtin_selector",
+        )
+        if st.button("Load built-in", disabled=chosen_builtin == "(none)"):
+            profile = get_built_in_profile(chosen_builtin)
+            _set_profile(profile, f"built-in: {chosen_builtin}")
+            st.success(f"Loaded built-in: {chosen_builtin}")
+            st.rerun()
+
+        st.divider()
+        st.subheader("Saved profiles")
+        try:
+            saved_names = list_profiles()
+        except Exception as exc:  # noqa: BLE001 - surface any storage error to the user
+            saved_names = []
+            st.warning(f"Could not list saved profiles: {exc}")
+
+        if saved_names:
+            chosen_saved = st.selectbox(
+                "Pick a saved profile",
+                options=["(none)"] + saved_names,
+                key="saved_selector",
+            )
+            col_load, col_delete = st.columns(2)
+            with col_load:
+                if st.button("Load saved", disabled=chosen_saved == "(none)"):
+                    try:
+                        profile = load_profile(chosen_saved)
+                        _set_profile(profile, f"saved: {chosen_saved}")
+                        st.success(f"Loaded {chosen_saved}")
+                        st.rerun()
+                    except (FileNotFoundError, ValueError) as exc:
+                        st.error(f"Load failed: {exc}")
+            with col_delete:
+                if st.button("Delete", disabled=chosen_saved == "(none)"):
+                    if delete_profile(chosen_saved):
+                        st.success(f"Deleted {chosen_saved}")
+                        st.rerun()
+                    else:
+                        st.warning("Profile already gone.")
+        else:
+            st.caption("No saved profiles yet.")
+
+        st.divider()
+        if st.button("New blank profile"):
+            _set_profile(_new_blank_profile(), "(blank)")
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Main form sections
+# ---------------------------------------------------------------------------
+
+
+def _render_project_setup(profile: Profile) -> None:
+    st.subheader("Project setup")
+    profile.profile_name = st.text_input(
+        "Profile name",
+        value=profile.profile_name,
+        help="Used as the filename when you save.",
+        key=_key("profile_name"),
+    )
+    profile.project_name = st.text_input(
+        "Project name",
+        value=profile.project_name,
+        help="Defaults to the source folder name when blank.",
+        key=_key("project_name"),
+    )
+    profile.default_source_folder = st.text_input(
+        "Source folder",
+        value=profile.default_source_folder,
+        help="Path to the folder of source files to scan recursively.",
+        key=_key("source_folder"),
+    )
+    profile.default_output_folder = st.text_input(
+        "Output folder",
+        value=profile.default_output_folder or "./llm_project_exports",
+        key=_key("output_folder"),
+    )
+
+
+def _render_packaging(profile: Profile) -> None:
+    st.subheader("Packaging")
+    targets = list(presets.TARGETS)
+    modes = list(presets.MODES)
+
+    col_target, col_mode = st.columns(2)
+    with col_target:
+        profile.target = st.selectbox(
+            "Target",
+            options=targets,
+            index=_safe_index(targets, profile.target),
+            key=_key("target"),
+        )
+    with col_mode:
+        profile.mode = st.selectbox(
+            "Mode",
+            options=modes,
+            index=_safe_index(modes, profile.mode),
+            key=_key("mode"),
+        )
+
+    default_budget = presets.get_bundle_token_budget(profile.target, profile.mode)
+    use_override = st.checkbox(
+        "Override default bundle token budget",
+        value=profile.max_bundle_tokens is not None,
+        help=f"Default for {profile.target} / {profile.mode}: {default_budget:,}",
+        key=_key("use_max_bundle_tokens"),
+    )
+    if use_override:
+        profile.max_bundle_tokens = int(
+            st.number_input(
+                "Max bundle tokens",
+                min_value=1,
+                value=int(profile.max_bundle_tokens or default_budget),
+                step=1000,
+                key=_key("max_bundle_tokens"),
+            )
+        )
+    else:
+        profile.max_bundle_tokens = None
+        st.caption(f"Using default: {default_budget:,} tokens / bundle")
+
+    include_csv = st.text_input(
+        "Include extensions (comma-separated, leave blank for the default set)",
+        value=_list_to_csv(profile.include_extensions),
+        help="Example: .md, .pdf, .html",
+        key=_key("include_extensions"),
+    )
+    profile.include_extensions = _csv_to_list(include_csv)
+
+    exclude_csv = st.text_input(
+        "Extra exclude directories (comma-separated)",
+        value=_list_to_csv(profile.exclude_dirs),
+        help="Added to the built-in defaults like .git, __pycache__, etc.",
+        key=_key("exclude_dirs"),
+    )
+    profile.exclude_dirs = _csv_to_list(exclude_csv)
+
+
+def _render_advanced(profile: Profile) -> None:
+    with st.expander("Advanced options (stored, not yet wired into packaging)"):
+        st.caption(
+            "These fields are saved with the profile and will be honored by "
+            "later milestones. Today they are inert."
+        )
+        col_left, col_right = st.columns(2)
+        with col_left:
+            profile.include_assets = st.checkbox(
+                "Include image / asset references",
+                value=profile.include_assets,
+                key=_key("include_assets"),
+            )
+            profile.copy_data_files = st.checkbox(
+                "Copy original CSV / XLSX into data/",
+                value=profile.copy_data_files,
+                key=_key("copy_data_files"),
+            )
+            profile.include_pdf_page_headers = st.checkbox(
+                "Include PDF page headers",
+                value=profile.include_pdf_page_headers,
+                key=_key("include_pdf_page_headers"),
+            )
+            profile.include_source_metadata = st.checkbox(
+                "Include source metadata block",
+                value=profile.include_source_metadata,
+                key=_key("include_source_metadata"),
+            )
+        with col_right:
+            profile.spreadsheet_preview_rows = int(
+                st.number_input(
+                    "Spreadsheet preview rows",
+                    min_value=0,
+                    value=int(profile.spreadsheet_preview_rows),
+                    step=1,
+                    key=_key("spreadsheet_preview_rows"),
+                )
+            )
+            options = list(BUNDLE_SEPARATOR_OPTIONS)
+            profile.bundle_separator_style = st.selectbox(
+                "Bundle separator style",
+                options=options,
+                index=_safe_index(options, profile.bundle_separator_style),
+                key=_key("bundle_separator_style"),
+            )
+            profile.create_zip = st.checkbox(
+                "Create ZIP of export folder",
+                value=profile.create_zip,
+                key=_key("create_zip"),
+            )
+
+
+def _render_save(profile: Profile) -> None:
+    st.subheader("Save")
+    col_status, col_button = st.columns([2, 1])
+    valid = False
+    with col_status:
+        try:
+            profile.validate()
+            valid = True
+            st.caption(f"Profile is valid. Save name: {profile.profile_name!r}")
+        except ValueError as exc:
+            st.warning(str(exc))
+    with col_button:
+        if st.button("Save profile", disabled=not valid):
+            try:
+                path = save_profile(profile)
+                st.success(f"Saved to {path}")
+            except (OSError, ValueError) as exc:
+                st.error(f"Save failed: {exc}")
+
+
+def _render_scan_audit(profile: Profile) -> None:
+    st.subheader("Scan audit")
+    st.caption(
+        "Scans only file paths and metadata. It does not convert, package, "
+        "or write anything."
+    )
+
+    source_text = profile.default_source_folder.strip()
+    include_extensions = _resolved_include_extensions(profile)
+    exclude_dirs = _resolved_exclude_dirs(profile)
+
+    col_scan, col_rescan = st.columns([1, 1])
+    with col_scan:
+        scan_clicked = st.button(
+            "Scan Source Folder",
+            disabled=not source_text,
+            type="primary",
+        )
+    with col_rescan:
+        rescan_clicked = st.button("Re-scan", disabled=not source_text)
+
+    if not source_text:
+        st.info("Set a source folder above, then scan it here.")
+        return
+
+    source_dir = Path(source_text).expanduser()
+
+    if not source_dir.exists() or not source_dir.is_dir():
+        if scan_clicked or rescan_clicked:
+            st.error(f"Source folder does not exist or is not a directory: {source_dir}")
+        return
+
+    key = _scan_cache_key(source_dir, include_extensions, exclude_dirs)
+    cache = st.session_state[SESSION_KEY_SCAN_CACHE]
+
+    if rescan_clicked:
+        cache.pop(key, None)
+        scan_clicked = True
+
+    if scan_clicked and key not in cache:
+        with st.spinner("Scanning source folder..."):
+            cache[key] = scan_directory(source_dir, include_extensions, exclude_dirs)
+
+    files = cache.get(key)
+    if files is None:
+        st.info("Click Scan Source Folder to build the read-only audit.")
+        return
+
+    total_files = len(files)
+    supported_files = sum(
+        1
+        for scanned in files
+        if presets.classify_extension(scanned.extension) != "unsupported"
+    )
+    unsupported_files = total_files - supported_files
+    total_size = sum(scanned.size_bytes for scanned in files)
+    duplicates = _duplicate_filename_groups(files)
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Total files", total_files)
+    metric_cols[1].metric("Supported files", supported_files)
+    metric_cols[2].metric("Unsupported files", unsupported_files)
+    metric_cols[3].metric("Estimated total size", _format_size(total_size))
+    metric_cols[4].metric("Duplicate filenames", len(duplicates))
+
+    if supported_files == 0:
+        st.warning("No supported files were found with the current include/exclude settings.")
+
+    st.markdown("**Exclude directories applied**")
+    st.write(", ".join(exclude_dirs) if exclude_dirs else "(none)")
+
+    counts_by_extension = Counter(scanned.extension or "(no extension)" for scanned in files)
+    counts_by_type = _count_by_file_type(files)
+
+    col_ext, col_type = st.columns(2)
+    with col_ext:
+        st.markdown("**Counts by extension**")
+        if counts_by_extension:
+            st.dataframe(
+                [
+                    {"extension": ext, "count": count}
+                    for ext, count in sorted(counts_by_extension.items())
+                ],
+                hide_index=True,
+                **_dataframe_layout_kwargs(),
+            )
+        else:
+            st.caption("No files found.")
+    with col_type:
+        st.markdown("**Counts by file type**")
+        st.dataframe(
+            [
+                {"file_type": file_type, "count": count}
+                for file_type, count in counts_by_type.items()
+            ],
+            hide_index=True,
+            **_dataframe_layout_kwargs(),
+        )
+
+    st.markdown("**Duplicate filenames**")
+    if duplicates:
+        for basename, paths in duplicates.items():
+            with st.expander(f"{basename} ({len(paths)} files)"):
+                for path in paths:
+                    st.write(path)
+    else:
+        st.caption("No duplicate filenames found.")
+
+    st.markdown("**Files**")
+    st.dataframe(
+        _files_table(files),
+        hide_index=True,
+        **_dataframe_layout_kwargs(),
+        column_config={
+            "relative_path": st.column_config.TextColumn("relative_path"),
+            "file_type": st.column_config.TextColumn("file_type"),
+            "extension": st.column_config.TextColumn("extension"),
+            "size_bytes": st.column_config.NumberColumn("size_bytes", format="%d"),
+            "will_process": st.column_config.CheckboxColumn("will_process", disabled=True),
+        },
+    )
+
+    _render_file_review(key, files)
+
+
+def _render_file_review(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+) -> None:
+    st.subheader("File review")
+
+    selections = _reconcile_file_selections(key, files)
+    included_count = sum(1 for included in selections.values() if included)
+    supported_count = sum(1 for scanned in files if _is_supported(scanned))
+    unsupported_count = len(files) - supported_count
+
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Discovered", len(files))
+    summary_cols[1].metric("Included", included_count)
+    summary_cols[2].metric("Supported", supported_count)
+    summary_cols[3].metric("Unsupported", unsupported_count)
+
+    all_extensions = sorted(
+        {scanned.extension or "(none)" for scanned in files},
+        key=lambda value: (value == "(none)", value),
+    )
+    widget_prefix = f"review_{_scan_key_id(key)}"
+
+    col_search, col_filter = st.columns([2, 1])
+    with col_search:
+        search_text = st.text_input(
+            "Search by file name or relative path",
+            key=f"{widget_prefix}_search",
+        )
+    with col_filter:
+        extension_filter = st.multiselect(
+            "Filter by extension",
+            options=all_extensions,
+            key=f"{widget_prefix}_extension_filter",
+        )
+
+    visible_files = _filter_review_files(files, search_text, extension_filter)
+    visible_paths = {str(scanned.relative_path) for scanned in visible_files}
+
+    st.caption(
+        f"Showing {len(visible_files)} of {len(files)} files. "
+        "Filtering does not reset include selections."
+    )
+
+    col_all, col_visible, col_ext = st.columns(3)
+    with col_all:
+        if st.button("Include all supported files", key=f"{widget_prefix}_include_all"):
+            for scanned in files:
+                selections[str(scanned.relative_path)] = _is_supported(scanned)
+            _bump_selection_revision(key)
+            st.rerun()
+        if st.button("Exclude all files", key=f"{widget_prefix}_exclude_all"):
+            for scanned in files:
+                selections[str(scanned.relative_path)] = False
+            _bump_selection_revision(key)
+            st.rerun()
+
+    with col_visible:
+        if st.button(
+            "Include visible supported files",
+            key=f"{widget_prefix}_include_visible",
+        ):
+            for scanned in visible_files:
+                if _is_supported(scanned):
+                    selections[str(scanned.relative_path)] = True
+            _bump_selection_revision(key)
+            st.rerun()
+        if st.button("Exclude visible files", key=f"{widget_prefix}_exclude_visible"):
+            for relative_path in visible_paths:
+                selections[relative_path] = False
+            _bump_selection_revision(key)
+            st.rerun()
+
+    with col_ext:
+        extension_actions = st.multiselect(
+            "Extension action target",
+            options=all_extensions,
+            key=f"{widget_prefix}_extension_action",
+        )
+        ext_button_cols = st.columns(2)
+        with ext_button_cols[0]:
+            if st.button(
+                "Include by extension",
+                disabled=not extension_actions,
+                key=f"{widget_prefix}_include_by_extension",
+            ):
+                action_set = set(extension_actions)
+                for scanned in files:
+                    if (scanned.extension or "(none)") in action_set:
+                        selections[str(scanned.relative_path)] = True
+                _bump_selection_revision(key)
+                st.rerun()
+        with ext_button_cols[1]:
+            if st.button(
+                "Exclude by extension",
+                disabled=not extension_actions,
+                key=f"{widget_prefix}_exclude_by_extension",
+            ):
+                action_set = set(extension_actions)
+                for scanned in files:
+                    if (scanned.extension or "(none)") in action_set:
+                        selections[str(scanned.relative_path)] = False
+                _bump_selection_revision(key)
+                st.rerun()
+
+    edited_rows = st.data_editor(
+        _review_rows(visible_files, selections),
+        hide_index=True,
+        key=f"{widget_prefix}_editor_{_selection_revision(key)}",
+        **_dataframe_layout_kwargs(),
+        column_config={
+            "include": st.column_config.CheckboxColumn("include"),
+            "file_name": st.column_config.TextColumn("file_name"),
+            "relative_path": st.column_config.TextColumn("relative_path"),
+            "extension": st.column_config.TextColumn("extension"),
+            "file_type": st.column_config.TextColumn("file_type"),
+            "size": st.column_config.TextColumn("size"),
+            "size_bytes": st.column_config.NumberColumn(
+                "size_bytes",
+                format="%d",
+            ),
+            "status": st.column_config.TextColumn("status"),
+            "notes": st.column_config.TextColumn("notes"),
+        },
+        disabled=[
+            "file_name",
+            "relative_path",
+            "extension",
+            "file_type",
+            "size",
+            "size_bytes",
+            "status",
+            "notes",
+        ],
+    )
+
+    for record in _editor_records(edited_rows):
+        relative_path = _record_path(record)
+        if relative_path:
+            selections[relative_path] = bool(record.get("include", False))
+
+    _render_preview_and_export(key, files, selections)
+
+
+def _render_preview_and_export(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> None:
+    profile = _profile()
+    selected_files = _selected_files(files, selections)
+    included_paths = _included_paths(files, selections)
+    included_count = len(selected_files)
+    skipped_count = len(files) - included_count
+    max_bundle_tokens = _resolved_max_bundle_tokens(profile)
+    bundle_count = _rough_bundle_count(
+        selected_files,
+        profile.target,
+        max_bundle_tokens,
+    )
+    warnings = _preview_warnings(profile, files, selected_files)
+    instruction_preview, instruction_warnings = _instruction_preview(
+        profile,
+        selected_files,
+        bundle_count,
+        max_bundle_tokens,
+    )
+    warnings.extend(instruction_warnings)
+
+    st.subheader("Preview")
+    st.caption(
+        "This is a planning preview from the current scan and file selections. "
+        "The export button below performs the real conversion and bundling."
+    )
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("Included files", included_count)
+    metric_cols[1].metric("Skipped files", skipped_count)
+    metric_cols[2].metric(
+        "Estimated bundles",
+        "RAG export" if bundle_count is None else bundle_count,
+    )
+    metric_cols[3].metric("Target / mode", f"{profile.target} / {profile.mode}")
+    metric_cols[4].metric("Max bundle tokens", f"{max_bundle_tokens:,}")
+
+    st.markdown("**Output folder name**")
+    st.code(_planned_export_folder_name(profile), language="text")
+
+    if warnings:
+        with st.expander("Warnings", expanded=True):
+            for warning in warnings:
+                st.warning(warning)
+
+    if instruction_preview:
+        with st.expander("Instruction file preview", expanded=False):
+            st.code(instruction_preview, language="markdown")
+
+    st.subheader("Export")
+    st.caption(
+        "Creates local files only. Nothing is uploaded to ChatGPT, Claude, "
+        "or any other LLM provider."
+    )
+    if st.button(
+        "Create LLM Project Bundles",
+        type="primary",
+        disabled=included_count == 0,
+        key=f"export_{_scan_key_id(key)}",
+    ):
+        _run_export(profile, included_paths, included_count)
+
+    last_result = st.session_state.get(SESSION_KEY_LAST_EXPORT_RESULT)
+    if isinstance(last_result, PackResult):
+        _render_export_result(profile.target, last_result)
+
+
+def _run_export(
+    profile: Profile,
+    included_paths: Sequence[str],
+    included_count: int,
+) -> None:
+    source_dir = _resolved_source_path(profile)
+    output_dir = _resolved_output_path(profile)
+    project_name = _resolved_project_name(profile, source_dir)
+    max_bundle_tokens = _resolved_max_bundle_tokens(profile)
+
+    progress_bar = st.progress(0)
+    status_placeholder = st.empty()
+    log_placeholder = st.empty()
+    progress_state = {"file_events": 0}
+    messages: List[str] = []
+
+    def on_progress(event: ProgressEvent) -> None:
+        if event.message:
+            messages.append(event.message)
+            log_placeholder.code("\n".join(messages[-12:]), language="text")
+            status_placeholder.info(event.message)
+        if event.kind == "file_start":
+            progress_state["file_events"] += 1
+            percent = min(
+                95,
+                int((progress_state["file_events"] / max(1, included_count)) * 90),
+            )
+            progress_bar.progress(percent)
+        elif event.kind in {"bundle_written", "manifest_start", "rag_written"}:
+            progress_bar.progress(95)
+        elif event.kind == "complete":
+            progress_bar.progress(100)
+
+    try:
+        result = run_packaging_job(
+            source_dir=source_dir,
+            output_dir=output_dir,
+            project_name=project_name,
+            target=profile.target,
+            mode=profile.mode,
+            max_bundle_tokens=max_bundle_tokens,
+            include_extensions=_resolved_include_extensions(profile),
+            exclude_dirs=_resolved_exclude_dirs(profile),
+            included_files=included_paths,
+            progress_callback=on_progress,
+        )
+    except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI
+        progress_bar.progress(100)
+        st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = None
+        st.error(f"Export failed: {exc}")
+        return
+
+    st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = result
+    if result.failed_count:
+        st.warning(
+            f"Export completed with {result.failed_count} failed file(s). "
+            "Check the manifest for details."
+        )
+    else:
+        st.success("Export complete.")
+
+
+def _render_export_result(target: str, result: PackResult) -> None:
+    st.subheader("Export result")
+    summary_cols = st.columns(4)
+    summary_cols[0].metric("Recorded files", result.processed_count)
+    summary_cols[1].metric("Failed", result.failed_count)
+    summary_cols[2].metric("Skipped", result.skipped_count)
+    summary_cols[3].metric("Estimated tokens", f"{result.total_token_estimate:,}")
+
+    st.markdown("**Export folder**")
+    st.code(str(result.export_dir), language="text")
+
+    rows = _generated_file_rows(result.export_dir)
+    if rows:
+        st.markdown("**Generated files**")
+        st.dataframe(rows, hide_index=True, **_dataframe_layout_kwargs())
+
+    if result.warnings:
+        with st.expander("Backend warnings", expanded=True):
+            for warning in result.warnings:
+                st.warning(warning)
+    if result.errors:
+        with st.expander("Backend errors", expanded=True):
+            for error in result.errors:
+                st.error(error)
+
+    st.markdown("**Manual upload instructions**")
+    for index, item in enumerate(_manual_upload_instructions(target, result), start=1):
+        st.write(f"{index}. {item}")
+
+    if result.instruction_path and result.instruction_path.exists():
+        with st.expander("Generated instruction file", expanded=False):
+            st.code(
+                result.instruction_path.read_text(encoding="utf-8"),
+                language="markdown",
+            )
+
+
+def _render_status() -> None:
+    st.subheader("Status")
+    st.info(
+        "The UI creates local export folders through the same backend used by "
+        "the CLI. Uploads remain manual; this app does not automate LLM logins, "
+        "browser actions, OCR, embeddings, or remote storage."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    st.set_page_config(page_title=PAGE_TITLE, layout="wide")
+    _ensure_session_state()
+
+    st.title(PAGE_TITLE)
+    st.caption("Local-only project context packager. Preview and export stay on this machine.")
+
+    _render_sidebar()
+    profile = _profile()
+    _render_project_setup(profile)
+    _render_packaging(profile)
+    _render_advanced(profile)
+    _render_save(profile)
+    _render_scan_audit(profile)
+    _render_status()
+
+
+if __name__ == "__main__":
+    main()

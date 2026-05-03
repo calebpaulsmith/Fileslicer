@@ -1,0 +1,20 @@
+{
+  "project_name": "sample_input",
+  "target": "generic",
+  "mode": "lean",
+  "entries": [
+    {
+      "doc_id": "DOC_0001",
+      "source_file": "quick.txt",
+      "source_path": "notes/quick.txt",
+      "original_extension": ".txt",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 49,
+      "char_count": 93,
+      "word_count": 16,
+      "notes": "",
+      "output_bundle": "02_BUNDLE_001.md"
+    }
+  ]
+}

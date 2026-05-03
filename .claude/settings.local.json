@@ -17,7 +17,11 @@
       "Bash(python -m unittest discover -s tests -v)",
       "Bash(python pack_project.py ./sample_input --target chatgpt --mode balanced --output ./test_output)",
       "Bash(python -c \"import sys; sys.path.insert\\(0, 'llm_project_packer'\\); from packer import bundler, config, exporters, manifest, markdown_utils, pipeline, presets, profiles, readers, scanner, token_estimator; print\\('ok', token_estimator.estimator_backend\\(\\)\\)\")",
-      "Bash(python -c \"import sys; sys.path.insert\\(0, 'llm_project_packer'\\); from packer.profiles import list_built_in_profiles, get_built_in_profile; [get_built_in_profile\\(n\\).validate\\(\\) for n in list_built_in_profiles\\(\\)]; print\\('built-ins ok:', list_built_in_profiles\\(\\)\\)\")"
+      "Bash(python -c \"import sys; sys.path.insert\\(0, 'llm_project_packer'\\); from packer.profiles import list_built_in_profiles, get_built_in_profile; [get_built_in_profile\\(n\\).validate\\(\\) for n in list_built_in_profiles\\(\\)]; print\\('built-ins ok:', list_built_in_profiles\\(\\)\\)\")",
+      "Bash(python -m py_compile streamlit_app.py)",
+      "Bash(python -m streamlit --version)",
+      "Bash(python -m streamlit run streamlit_app.py --server.headless=true --server.port=8519 --server.runOnSave=false --browser.gatherUsageStats=false)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8519)"
     ]
   }
 }

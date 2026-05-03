@@ -49,13 +49,55 @@ or remote hosting.
 Version 2 should be a practical local UI over the existing backend, not the
 full recommendation engine. Keep it small enough to ship.
 
-Already shipped (backend only — no Streamlit yet):
+Already shipped:
 
 - Shared backend entry point: `run_packaging_job(...) -> PackResult` in
   `packer/pipeline.py`. CLI and future UI must both call into
   `packer.pipeline` — do not duplicate scan/convert/bundle/export logic in
   UI code. The CLI runs the pipeline through a `_print_progress` callback;
   the UI will run it through a different callback.
+- Streamlit UI at the repo root (`streamlit_app.py` +
+  `requirements-ui.txt`). Launches with
+  `streamlit run streamlit_app.py`. Today it loads built-in templates,
+  loads / saves user profiles via `packer.profiles`, lets the user edit
+  every active and inert profile field, includes a scan/audit dashboard
+  plus file review include/exclude controls, previews the planned export,
+  and calls `run_packaging_job` to create local bundles. The CLI is
+  unchanged. Streamlit lives in
+  `requirements-ui.txt`, never in the core `requirements.txt`. Profiles
+  edited in the UI live at
+  `~/.llm_project_packer/profiles/`, the same location the CLI's profile
+  API reads from.
+- Scan/audit screen in `streamlit_app.py`: "Scan Source Folder" and
+  "Re-scan" use `packer.scanner.scan_directory(...)` plus
+  `packer.presets.classify_extension(...)` only. The dashboard is read-only:
+  totals, supported/unsupported counts, extension and file-type breakdowns,
+  total size, duplicate filename groups, applied exclude directories,
+  zero-supported warning, and a sortable file dataframe with read-only
+  `will_process`. Scan results are cached in `st.session_state` by the
+  resolved source/include/exclude tuple. This screen does not call readers,
+  `run_packaging_job`, or write files.
+- File review/include-exclude in `streamlit_app.py`: after a successful scan,
+  the UI shows discovered files with editable include flags, file name,
+  relative path, extension, file type, size, status, and notes. Supported
+  files (`file_type != "unsupported"`) default included; unsupported files
+  default excluded but remain visible with clear notes. Search by file
+  name/path, extension filtering, include/exclude all, include/exclude
+  visible, and include/exclude by extension are implemented. Selections live
+  in `st.session_state["file_review_selections"]` as
+  `{repr(scan_key): {relative_path: bool}}`, with relative paths as stable
+  identities. Re-scans preserve selections for paths still present, add new
+  files with the support-status defaults, and drop missing paths. Export
+  passes included relative paths to `run_packaging_job(included_files=...)`
+  so excluded files are not processed.
+- Preview/export in `streamlit_app.py`: after scan/review, the UI shows
+  included and skipped counts, rough bundle count, target/mode, max bundle
+  tokens, planned output folder pattern, warning notes, and an instruction
+  preview generated in a temporary directory. The `Create LLM Project
+  Bundles` button calls the shared backend, displays progress messages,
+  stores the `PackResult` in session state, lists generated files, shows
+  success/failure counts, and renders target-specific manual upload
+  instructions. It does not automate upload to any LLM.
 - Project profile storage in `packer/profiles.py`:
   - `Profile` dataclass (16 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
@@ -86,24 +128,17 @@ Already shipped (backend only — no Streamlit yet):
   28 in total; passes with `python -m unittest discover -s tests` or
   `pytest`.
 
-V2 should focus on:
+V2 should focus next on (in roughly this order):
 
-- optional Streamlit UI as a thin adapter over `packer.pipeline`;
-- project setup screen: project name, source path, target, mode, output path;
-- file scan/audit screen showing file count, type breakdown, total size,
-  estimated tokens where available, unsupported files, and broken/missing
-  assets surfaced by readers;
-- packaging mode selector using the current modes (`lean`, `balanced`,
-  `full`, `visual_manual`) plus clear UI labels such as ChatGPT Project,
-  Claude Project, one-shot chat, and RAG-ready where they map to existing
-  backend targets;
-- file review/include-exclude before export;
-- preview of manifest, bundle headers, first converted sections, warnings,
-  and estimated bundle count;
-- export screen with progress events, result paths, and copy-friendly
-  instruction text;
-- project profile UI: build the setup screen and per-screen forms on top
-  of `packer.profiles` (the storage layer is already shipped).
+- **packaging settings screen** — surface the resolved per-bundle token
+  budget for the active target/mode plus the optional override; reuse
+  `presets.get_bundle_token_budget` and the existing modes (`lean`,
+  `balanced`, `full`, `visual_manual`). Clearer UI labels (ChatGPT Project,
+  Claude Project, one-shot chat, RAG-ready) are allowed as cosmetic
+  remappings of existing backend targets — do not invent new targets.
+- **profile UI extensions** — the project setup screen already exists;
+  follow-ups bind the per-screen forms to the same `Profile` so a saved
+  profile captures the user's full configuration including selection.
 
 Backend cleanup that still belongs in V2:
 
@@ -233,6 +268,39 @@ python pack_project.py                                              # prints hel
 python pack_project.py .\sample_input --target chatgpt              # argparse error: --mode required
 python pack_project.py .\does\not\exist --target chatgpt --mode balanced  # config error, exit code 2
 ```
+
+UI smoke checks for the scan/review screens:
+
+```powershell
+# Syntax check
+python -m py_compile streamlit_app.py
+
+# Headless boot; expect HTTP 200 from curl.exe, then stop Streamlit with Ctrl+C
+streamlit run streamlit_app.py --server.headless=true --server.port=8519
+curl.exe -I http://localhost:8519
+```
+
+Manual Streamlit inputs and expected outputs:
+
+- Source folder: `.\sample_input`; click `Scan Source Folder`.
+  Expected: `Discovered = 5`, `Supported = 5`, `Unsupported = 0`,
+  `Included = 5`, and all rows default included.
+- In file review, click `Exclude all files`.
+  Expected: `Included = 0`; all visible include flags are unchecked.
+- Select `.txt` in `Extension action target`, click `Include by extension`.
+  Expected: `Included = 1`; filtering/search changes do not reset it.
+- Search for `notes`, click `Exclude visible files`.
+  Expected: only currently visible matching rows are changed; hidden rows keep
+  their previous selection.
+- Add an unsupported file such as `sample_input\scratch.tmp`, then click
+  `Re-scan`.
+  Expected: the unsupported row remains visible, defaults excluded, has
+  `status = unsupported`, and notes explain that the extension is unsupported.
+- For re-scan preservation, start with a supported file excluded, add a new
+  supported file, remove a different file, then click `Re-scan`.
+  Expected: the still-present excluded path remains excluded, the new
+  supported file defaults included, unsupported files default excluded, and
+  removed paths disappear from the selection state.
 
 After a run, inspect the newest folder under `.\test_output\`:
 

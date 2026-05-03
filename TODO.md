@@ -19,18 +19,75 @@ This is a plan only. Do not implement until each milestone is approved.
 
 ## Milestone summary
 
-| # | Milestone | Touches | Output |
-|---|---|---|---|
-| 1 | Refactor backend into reusable functions | `pack_project.py`, `packer/` | New `packer/pipeline.py` |
-| 2 | Add dataclasses / options / result objects | `packer/pipeline.py`, `packer/events.py` | `PackResult`, `ProgressEvent`, `ScanResult` |
-| 3 | Add project profile support | `packer/profiles.py`, `profiles/` | Save/load/list profiles |
-| 4 | Streamlit project setup screen | `streamlit_app.py`, `streamlit_ui/` | First UI screen |
-| 5 | Source scan / audit screen | `streamlit_ui/scan_screen.py` | Read-only scan results |
-| 6 | File review / include-exclude | `streamlit_ui/review_screen.py`, pipeline filter hook | Per-file selection persists |
-| 7 | Packaging settings screen | `streamlit_ui/settings_screen.py` | Mode / budget overrides |
-| 8 | Preview screen | `streamlit_ui/preview_screen.py` | In-memory convert + render |
-| 9 | Export / progress / results | `streamlit_ui/export_screen.py` | Final pack + result links |
-| 10 | README + manual test instructions | `README.md`, `CLAUDE.md` | Docs match V2 |
+Status legend: ✅ shipped · 🟡 in progress · ⚪ not started
+
+| # | Status | Milestone | Touches | Output |
+|---|---|---|---|---|
+| 1 | ✅ | Refactor backend into reusable functions | `pack_project.py`, `packer/` | `packer/pipeline.py` with `run_packaging_job(...) -> PackResult` |
+| 2 | ✅ | Add dataclasses / options / result objects | `packer/pipeline.py` | `PackResult`, `ProgressEvent`, manifest-paths dict |
+| 3 | ✅ | Add project profile support | `packer/profiles.py`, `tests/test_profiles.py` | Save/load/list/delete + 5 built-in templates + `to_packaging_kwargs()` |
+| 4 | ✅ | Streamlit project setup screen | `streamlit_app.py`, `requirements-ui.txt` | UI skeleton: built-in/saved profile selectors + setup/packaging/advanced/save sections |
+| 5 | ✅ | Source scan / audit screen | `streamlit_app.py` | Read-only scan dashboard |
+| 6 | ✅ | File review / include-exclude | `streamlit_app.py` | Session-state per-file selection for a future `included_files` hook |
+| 7 | ⚪ | Packaging settings screen | `streamlit_app.py` | Override surface + projected bundle count |
+| 8 | ✅ | Preview screen | `streamlit_app.py` | Selection-based summary + instruction preview + warnings |
+| 9 | ✅ | Export / progress / results | `streamlit_app.py` | Calls `run_packaging_job` with included files + progress + results |
+| 10 | 🟡 | README + manual test instructions | `README.md`, `CLAUDE.md` | Docs follow each shipped milestone |
+
+Notes since the original plan was written:
+
+- Milestones 1–6 and 8–9 are merged. The pipeline
+  signature settled on
+  `run_packaging_job(source_dir, output_dir, project_name, target, mode,
+  max_bundle_tokens=None, include_extensions=None, exclude_dirs=None,
+  included_files=None, options=None, progress_callback=None) -> PackResult`.
+  The UI now passes selected relative paths through `included_files` when
+  creating an export.
+- The UI is a single-file Streamlit app today (`streamlit_app.py`) rather
+  than the originally planned `streamlit_ui/` package. Splitting into
+  per-screen modules is fine when the file gets long; do it without
+  ceremony.
+- File review state is keyed by the resolved scan tuple and uses relative
+  paths as the stable file identity:
+  `st.session_state["file_review_selections"] == {repr(scan_key):
+  {relative_path: bool}}`. Re-scans preserve selections for paths still
+  present, default new supported files included, default new unsupported
+  files excluded, and drop missing paths.
+- Preview/export shipped as a single-file `streamlit_app.py` implementation:
+  preview uses scan metadata plus current selections for counts, rough bundle
+  estimates, warnings, output-folder pattern, and temporary instruction-file
+  preview. Export calls `run_packaging_job` with `included_files`, displays
+  progress messages, generated files, success/failure counts, and manual
+  target-specific upload instructions. It does not automate upload.
+- The "Advanced options" expander already binds every inert profile field
+  (`include_assets`, `copy_data_files`, `spreadsheet_preview_rows`,
+  `include_pdf_page_headers`, `include_source_metadata`,
+  `bundle_separator_style`, `create_zip`). When any of these get wired into
+  the pipeline they move from `profiles.INERT_FIELDS` to
+  `profiles.ACTIVE_FIELDS` per the rule in CLAUDE.md.
+
+## How V2 connects to the longer-term Project Context Packager vision
+
+The product vision in `CLAUDE.md` (goal selector, target-platform strategy
+recommendations, named packaging strategies, recommendation engine, source
+hierarchy, richer audit dashboard, chunking strategies, source quality
+scoring, deduplication, privacy redaction) is **V3** work, not V2.
+
+V2's job is to make the existing backend usable from a UI, with one
+explicit alignment to V3:
+
+- The scan/audit screen (milestone 5) is the seed for the V3 audit
+  dashboard. V2 ships only the cheap, read-only metrics derivable from
+  `scanner.scan_directory` + `presets.classify_extension`. Anything that
+  requires running the readers (broken images, OCR-needed flags) is a
+  later optional pass; anything that requires content hashing
+  (deduplication), heuristics (sensitive data, source quality scoring), or
+  recommendations is V3.
+
+V2 does not introduce: goal selectors, named packaging strategies that
+aren't already a target/mode pair, the recommendation engine, source
+hierarchy, chunking-strategy selector, OCR, dedup, sensitive-data
+detection, privacy redaction, or multiple-export comparison. Those wait.
 
 ---
 
@@ -227,76 +284,130 @@ This is a plan only. Do not implement until each milestone is approved.
 ## Milestone 5 — Source scan / audit screen
 
 ### Files to modify
-- `streamlit_ui/state.py` — add scan-result cache key.
+- `streamlit_app.py` — add a "Scan Source Folder" button and a
+  read-only audit dashboard. Cache the result in `st.session_state` keyed
+  by the resolved source/include/exclude tuple so a re-render does not
+  re-walk the disk.
 
 ### Files to create
-- `streamlit_ui/scan_screen.py`.
+- None required; only split `streamlit_app.py` into a `streamlit_ui/`
+  package if the file gets unwieldy.
 
 ### Behavior
-- "Scan" button calls `pipeline.scan(cfg)` (no conversion).
-- Render a summary: total files, breakdown by `file_type`, total bytes,
-  count of unsupported files.
-- Render the file list as a Streamlit dataframe (sortable, filterable):
-  columns `relative_path`, `file_type`, `extension`, `size_bytes`,
-  `will_process` (default `True` for supported, `False` for unsupported).
-- "Re-scan" button to refresh after the user changes `--include-extensions`
-  or `--exclude-dirs`.
+- Button reuses `packer.scanner.scan_directory(source, include, exclude)`
+  exactly as the CLI / pipeline already do — no parallel scan logic.
+- Show, all derivable from the existing `ScannedFile` records and
+  `presets.classify_extension`:
+  - total files found
+  - supported files (anything not classified `unsupported`)
+  - unsupported files
+  - counts by extension and by `file_type` (text / html / pdf / docx /
+    csv / xlsx / image / unsupported)
+  - total bytes (sum of `ScannedFile.size_bytes`), human-readable
+  - duplicate filenames within the source tree (group by lowercase
+    `relative_path.name`, list the duplicates) — this is filename-only,
+    NOT content hashing
+  - the resolved exclude-dirs that the scan actually applied (merge of
+    `presets.DEFAULT_EXCLUDE_DIRS` + profile's `exclude_dirs`)
+  - clear warning when zero supported files are found
+- Render the file list as a sortable Streamlit dataframe with columns
+  `relative_path`, `file_type`, `extension`, `size_bytes`, and a
+  read-only `will_process` flag. Per-file include/exclude controls are
+  milestone 6, not here.
+- "Re-scan" button invalidates the cache and re-runs.
+- No conversion. Do not call `run_packaging_job`. Do not write files.
 
 ### Tests / manual checks
-- Unit: `pipeline.scan(cfg)` returns the same `ScannedFile` list whether
-  invoked from CLI or UI.
-- Manual: scan `sample_input/`; counts match `01_SOURCE_MANIFEST.md`'s
-  total documents from a CLI run.
+- Unit: a helper that aggregates `List[ScannedFile]` into the audit
+  summary (counts, totals, duplicates) is pure and unit-testable.
+- Manual: scan `sample_input/`; total files matches what
+  `01_SOURCE_MANIFEST.md` reports from a CLI run, and the duplicate-filename
+  list is empty.
+- Manual: drop a deliberately-named duplicate
+  (e.g. add `sample_input/notes/README.md` clone elsewhere); duplicate
+  list shows it.
 
 ### Risk areas
 - Large source folders (10k+ files): keep the dataframe paginated or
-  capped, and call out the limit in the UI.
-- Walking OneDrive-on-demand folders may trigger downloads. Document, do
-  not silently force-download.
+  capped, and surface a count near any cap in the UI.
+- OneDrive-on-demand folders may trigger downloads when walked.
+  Document this; do not silently force-download.
+- Don't smuggle V3 features in. OCR-needed flags, broken-image detection,
+  content-hash deduplication, sensitive-data warnings, and source-quality
+  scoring are V3 and require explicit milestones.
 
 ### Acceptance criteria
-- Scan results displayed in the UI are identical to what `pipeline.scan`
-  returns from a Python REPL with the same `PackerConfig`.
+- Audit values in the UI agree with what
+  `packer.scanner.scan_directory` + `presets.classify_extension` return
+  from a Python REPL with the same inputs.
+- The CLI smoke commands in CLAUDE.md still pass.
+- No new top-level dependencies added; Streamlit stays in
+  `requirements-ui.txt` only.
 
 ---
 
 ## Milestone 6 — File review / include-exclude
 
 ### Files to modify
-- `llm_project_packer/packer/pipeline.py` — `convert()` accepts an optional
-  `selected_paths: Iterable[Path] | None` filter applied to the scan
-  result. The CLI passes `None` (current behavior preserved).
-- `llm_project_packer/packer/profiles.py` — `Profile.selected_doc_ids` or
-  `selected_relative_paths` field round-trips with the profile.
+- `streamlit_app.py` — shipped in the single-file UI. No backend, profile,
+  CLI, reader, export, or pipeline behavior changed in this milestone.
 
 ### Files to create
-- `streamlit_ui/review_screen.py`.
+- None. A future split into `streamlit_ui/review_screen.py` is still allowed
+  when the Streamlit app gets large enough to justify it.
 
 ### Behavior
-- Render the scan result with a checkbox per file (default = include).
-- Bulk-filter chips: by extension, by folder prefix, by file_type.
-- "Save selection to profile" persists the override.
-- The selection is fed to `pipeline.convert(cfg, scanned, ...,
-  selected_paths=selection)`.
+- After a successful scan, render the discovered files with editable include
+  flags, file name, relative path, extension, file type, human-readable size,
+  `size_bytes`, status, and notes.
+- Supported files (`file_type != "unsupported"`) default included.
+  Unsupported files default excluded but remain visible with clear
+  unsupported status/notes.
+- Controls shipped: search by file name or relative path, filter by
+  extension, include all supported files, exclude all files, include visible
+  supported files, exclude visible files, include by extension, and exclude
+  by extension.
+- Selection state is stored in `st.session_state`, keyed by the resolved scan
+  tuple. Relative paths are the stable file identity. Filtering and searching
+  do not reset selections.
+- Re-scan reconciliation preserves selections for paths still present, drops
+  missing paths, defaults newly discovered supported files included, and
+  defaults newly discovered unsupported files excluded.
+- The selection is not yet persisted to profiles and is not yet fed to
+  `run_packaging_job`.
 
 ### Tests / manual checks
-- Unit: `convert(..., selected_paths=[a, b])` only converts `a` and `b`,
-  yet the manifest still records the unselected files with
-  `status="skipped"` and `notes="excluded by user selection"`.
-- Manual: deselect the `.png` in `sample_input/`, run pack, verify the
-  manifest shows the PNG as skipped and no `assets/DOC_xxxx/` was created
-  for it.
+- `python -m py_compile streamlit_app.py`
+- `python -m pytest -q llm_project_packer\tests`
+- `streamlit run streamlit_app.py --server.headless=true --server.port=8519`
+  boots cleanly and `curl.exe -I http://localhost:8519` returns HTTP 200.
+- Manual: scan `.\sample_input`; expect 5 discovered files, 5 supported, 0
+  unsupported, and 5 included by default.
+- Manual: use search/filter plus bulk include/exclude controls; selections
+  should persist through reruns and filtering.
+- Manual: add unsupported-only files in a temporary folder or add
+  `sample_input\scratch.tmp`; unsupported rows should remain visible,
+  excluded by default, with clear status/notes.
+- Manual: exclude an existing supported file, add a new supported file,
+  remove a different file, and click `Re-scan`; expect still-present
+  selections preserved, new supported files included, new unsupported files
+  excluded, and missing paths dropped.
 
 ### Risk areas
 - The relationship between manifest `DOC_ID` and "selected by user" must
   remain stable across re-scans. Use the relative path as the stable key,
   not the doc index.
-- Ensure unsupported-file rows still appear in the manifest even when
-  unselected — never silently drop a file.
+- Ensure unsupported-file rows stay visible in the review UI even when
+  excluded by default — never silently drop a file from review.
+- Later milestones must decide whether the session-state selection is saved
+  to profiles, passed directly as `included_files`, or both.
 
 ### Acceptance criteria
-- Per-file include/exclude survives a profile save/load round-trip.
-- A user-skipped file appears in the manifest with a clear `notes` reason.
+- Per-file include/exclude survives Streamlit reruns, filtering/search, and
+  re-scans for stable relative paths.
+- Unsupported files are visible, excluded by default, and clearly explained.
+- No readers, conversion, packaging, export, file writes, or CLI behavior
+  changes were introduced.
 
 ---
 

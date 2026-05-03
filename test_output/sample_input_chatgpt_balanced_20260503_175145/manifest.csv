@@ -1,0 +1,6 @@
+doc_id,source_file,source_path,original_extension,file_type,status,token_estimate,char_count,word_count,notes,output_bundle
+DOC_0001,data.csv,data.csv,.csv,csv,ok,98,297,61,,02_BUNDLE_001.md
+DOC_0002,intro.html,manuals/pages/intro.html,.html,html,ok,88,235,44,Missing image asset: ../../missing/diagram.png,02_BUNDLE_001.md
+DOC_0003,icon.png,notes/icon.png,.png,image,ok,53,111,13,image copied; no OCR in v1,02_BUNDLE_001.md
+DOC_0004,quick.txt,notes/quick.txt,.txt,text,ok,49,93,16,,02_BUNDLE_001.md
+DOC_0005,README.md,notes/README.md,.md,text,ok,87,244,39,,02_BUNDLE_001.md

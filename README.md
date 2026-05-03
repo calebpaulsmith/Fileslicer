@@ -1,15 +1,29 @@
 # llm_project_packer
 
-A local Python command-line tool that turns a folder of mixed source files
-into clean, upload-ready Markdown bundles for ChatGPT Projects, Claude
-Projects, generic LLM chats, or simple RAG workflows.
+A local Python command-line tool and Streamlit UI that turns a folder of mixed
+source files into upload-ready project context bundles for ChatGPT Projects,
+Claude Projects, generic LLM chats, or simple RAG workflows.
 
-Version 1 is local only. It does not upload anything, log in anywhere, run OCR,
-create embeddings, host a web app, or automate ChatGPT/Claude.
+The long-term goal is a **Project Context Packager**: a local app that helps
+choose the right packaging strategy for the LLM and task, not just a file
+combiner. See `CLAUDE.md` for the full product vision and version scope.
+
+Status:
+
+- **Version 1 CLI:** shipped. Recursive scan, per-type Markdown conversion,
+  identity headers, manifests, target-aware bundles, instructions, and RAG
+  chunks.
+- **Version 2 UI:** in progress but usable for local preview/export. The
+  Streamlit app can load/save profiles, scan/audit sources, review included
+  files, preview the planned export, and create bundles through the shared
+  backend.
+
+Everything is local. The tool does not upload files, automate logins, drive a
+browser, run OCR, create embeddings, or host a server.
 
 ## Quick Start On Windows
 
-From this folder:
+From this repo root:
 
 ```powershell
 cd C:\Users\caleb\OneDrive\Desktop\Scripts\Fileslicer
@@ -18,19 +32,8 @@ python -m venv llm_project_packer\.venv
 python .\pack_project.py .\sample_input --target chatgpt --mode balanced
 ```
 
-You can also run from inside the project folder:
-
-```powershell
-cd C:\Users\caleb\OneDrive\Desktop\Scripts\Fileslicer\llm_project_packer
-.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
-.\.venv\Scripts\python.exe .\pack_project.py ..\sample_input --target chatgpt --mode balanced
-```
-
 If you want to pack your own folder, replace `.\sample_input` with the folder
 you want to process.
-
-If you run `pack_project.py` without arguments, it will print usage help. The
-required pieces are always: a source folder, `--target`, and `--mode`.
 
 ## macOS / Linux
 
@@ -41,6 +44,34 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python pack_project.py ../sample_input --target chatgpt --mode balanced
 ```
+
+## Streamlit UI
+
+Install the optional UI dependency from the repo root. This does not add
+Streamlit to the core CLI install.
+
+```powershell
+pip install -r requirements-ui.txt
+streamlit run streamlit_app.py
+```
+
+Streamlit opens at `http://localhost:8501`.
+
+UI flow:
+
+1. Load a built-in profile or create a blank profile.
+2. Set project name, source folder, output folder, target, and mode.
+3. Click `Scan Source Folder`.
+4. Review files and include/exclude what should be packed.
+5. Check the preview: included/skipped counts, target/mode, bundle budget,
+   rough bundle count, output folder pattern, warnings, and instruction
+   preview.
+6. Click `Create LLM Project Bundles`.
+7. Use the generated folder path and manual upload instructions shown after
+   export.
+
+Profiles are saved to `~/.llm_project_packer/profiles/`, the same location
+used by the profile API.
 
 ## What It Does
 
@@ -86,19 +117,37 @@ Images:
 - `.svg`
 
 Unsupported file types are recorded in the manifest as skipped instead of
-crashing the run.
+crashing the run when they are included.
 
-When the scanner finds a file type the tool does not know how to convert, it
-still assigns a `DOC_ID` and records the file in the manifest with
-`status = skipped`.
-
-## Usage
+## CLI Usage
 
 ```powershell
 python .\pack_project.py .\source_files --target chatgpt --mode balanced
 ```
 
-The CLI calls the same backend function future UI adapters should use:
+Arguments:
+
+| Argument | Description |
+| --- | --- |
+| `source_dir` | Folder of source files to scan recursively. |
+| `--target` | One of `chatgpt`, `claude`, `generic`, `rag`. |
+| `--mode` | One of `lean`, `balanced`, `full`, `visual_manual`. |
+| `--output` | Output directory. Default: `.\llm_project_exports`. |
+| `--max-bundle-tokens` | Optional override for the per-bundle token budget. |
+| `--project-name` | Optional project name. Defaults to the source folder name. |
+| `--include-extensions` | Comma-separated list, for example `.md,.txt,.html,.pdf`. |
+| `--exclude-dirs` | Comma-separated list of directory names to skip, added to the defaults. |
+
+Examples:
+
+```powershell
+python .\pack_project.py ".\manuals\transmission" --target claude --mode balanced
+python .\pack_project.py ".\docs" --target chatgpt --mode lean --include-extensions .html,.pdf
+python .\pack_project.py ".\kb" --target rag --mode balanced
+python .\pack_project.py ".\big_corpus" --target generic --mode full --max-bundle-tokens 50000
+```
+
+The CLI and UI both use the shared backend:
 
 ```python
 from packer import run_packaging_job
@@ -109,35 +158,6 @@ result = run_packaging_job(
     target="chatgpt",
     mode="balanced",
 )
-```
-
-Arguments:
-
-| Argument | Description |
-| --- | --- |
-| `source_dir` | Folder of source files to scan recursively. |
-| `--target` | One of `chatgpt`, `claude`, `generic`, `rag`. |
-| `--mode` | One of `lean`, `balanced`, `full`, `visual_manual`. |
-| `--output` | Output directory. Default: `.\llm_project_exports` relative to where you run the command. |
-| `--max-bundle-tokens` | Optional override for the per-bundle token budget. |
-| `--project-name` | Optional project name. Defaults to the source folder name. |
-| `--include-extensions` | Comma-separated list, for example `.md,.txt,.html,.pdf`. |
-| `--exclude-dirs` | Comma-separated list of directory names to skip, added to the defaults. |
-
-The scanner skips common generated folders such as `.venv`, `node_modules`,
-`llm_project_exports`, `sample_output`, and `test_output`. If the output folder
-is inside the source folder you are packing, it is also skipped automatically.
-
-PowerShell examples:
-
-```powershell
-python .\pack_project.py ".\manuals\transmission" --target claude --mode balanced
-
-python .\pack_project.py ".\docs" --target chatgpt --mode lean --include-extensions .html,.pdf
-
-python .\pack_project.py ".\kb" --target rag --mode balanced
-
-python .\pack_project.py ".\big_corpus" --target generic --mode full --max-bundle-tokens 50000
 ```
 
 ## Targets And Modes
@@ -191,6 +211,10 @@ llm_project_exports/
       source_map.json
 ```
 
+The scanner skips common generated folders such as `.venv`, `node_modules`,
+`llm_project_exports`, `sample_output`, and `test_output`. If the output
+folder is inside the source folder, it is skipped automatically during scan.
+
 ## Manual Upload
 
 ChatGPT Project:
@@ -209,10 +233,17 @@ Claude Project:
 3. Open `00_CLAUDE_PROJECT_INSTRUCTIONS.md` and paste its instruction block
    into the project's custom instructions.
 
-## Version 1 Limitations
+RAG export:
 
-- No web UI.
-- No automatic upload to ChatGPT or Claude.
+1. Use `manifest.json` or `manifest.csv` as the source index.
+2. Use `rag_ready/chunks.jsonl` as the chunk file.
+3. Use `rag_ready/source_map.json` to map documents to chunks.
+
+No upload step is automated.
+
+## Current Limitations
+
+- No automatic upload to ChatGPT, Claude, or any other LLM.
 - No OCR.
 - No embeddings or vector database.
 - No login automation.
