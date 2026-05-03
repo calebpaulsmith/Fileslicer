@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast,sys; [ast.parse\\(open\\(p\\).read\\(\\)\\) for p in ['pack_project.py','packer/__init__.py','packer/config.py','packer/scanner.py','packer/readers.py','packer/markdown_utils.py','packer/token_estimator.py','packer/manifest.py','packer/bundler.py','packer/exporters.py','packer/presets.py']]; print\\('OK: all files parse'\\)\")",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); from packer import bundler, config, exporters, manifest, markdown_utils, presets, readers, scanner, token_estimator; print\\('imports OK; estimator:', token_estimator.estimator_backend\\(\\)\\)\")",
+      "Bash(mkdir -p \"/tmp/llm_packer_test/sample/notes\")",
+      "Bash(mkdir -p \"/tmp/llm_packer_test/sample/manuals/pages\")",
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python -c \"import bs4, markdownify; print\\('bs4', bs4.__version__\\); print\\('markdownify', markdownify.__version__\\)\")",
+      "Bash(pip install *)",
+      "Bash(python -c \"import pandas, openpyxl; print\\('pandas', pandas.__version__\\); print\\('openpyxl', openpyxl.__version__\\)\")",
+      "Bash(python pack_project.py \"../sample_input\" --target chatgpt --mode balanced --output \"../sample_output\")",
+      "Bash(python pack_project.py \"../sample_input\" --target rag --mode balanced --output \"../sample_output\")"
+    ]
+  }
+}

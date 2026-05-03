@@ -1,0 +1,4 @@
+A short plain text note.
+
+Line two.
+Line three: special chars - em-dash, cafe, naive, hello.

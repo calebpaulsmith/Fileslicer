@@ -1,0 +1,8 @@
+doc_id,source_file,source_path,original_extension,file_type,status,token_estimate,char_count,word_count,notes,output_bundle
+DOC_0001,README.md,llm_project_packer/README.md,.md,text,ok,1591,5768,763,,02_BUNDLE_001.md
+DOC_0002,requirements.txt,llm_project_packer/requirements.txt,.txt,text,ok,119,211,22,,02_BUNDLE_001.md
+DOC_0003,data.csv,sample_input/data.csv,.csv,csv,ok,133,297,61,,02_BUNDLE_001.md
+DOC_0004,intro.html,sample_input/manuals/pages/intro.html,.html,html,ok,102,232,41,Missing image asset: ../../missing/diagram.png,02_BUNDLE_001.md
+DOC_0005,icon.png,sample_input/notes/icon.png,.png,image,ok,65,111,13,image copied; no OCR in v1,02_BUNDLE_001.md
+DOC_0006,quick.txt,sample_input/notes/quick.txt,.txt,text,ok,58,93,16,,02_BUNDLE_001.md
+DOC_0007,README.md,sample_input/notes/README.md,.md,text,ok,81,244,39,,02_BUNDLE_001.md
