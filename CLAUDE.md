@@ -49,13 +49,42 @@ or remote hosting.
 Version 2 should be a practical local UI over the existing backend, not the
 full recommendation engine. Keep it small enough to ship.
 
-Already started:
+Already shipped (backend only — no Streamlit yet):
 
-- Shared backend entry point exists:
-  `run_packaging_job(...) -> PackResult`.
-- CLI and future UI should both use `packer.pipeline`; do not duplicate
-  scan/convert/bundle/export logic in UI code.
-- Automated tests exist under `llm_project_packer/tests/`.
+- Shared backend entry point: `run_packaging_job(...) -> PackResult` in
+  `packer/pipeline.py`. CLI and future UI must both call into
+  `packer.pipeline` — do not duplicate scan/convert/bundle/export logic in
+  UI code. The CLI runs the pipeline through a `_print_progress` callback;
+  the UI will run it through a different callback.
+- Project profile storage in `packer/profiles.py`:
+  - `Profile` dataclass (16 fields total) + `save_profile`,
+    `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
+    `~/.llm_project_packer/profiles/` by default; every function accepts a
+    `profiles_dir` override so tests and a future UI can redirect the
+    location.
+  - `Profile.to_packaging_kwargs(source_dir=..., output_dir=...,
+    project_name=...)` returns kwargs ready for `run_packaging_job`. It
+    emits only the active fields and lets callers override
+    source/output/project at call time without mutating the profile.
+  - `profiles.ACTIVE_FIELDS` lists the eight fields that influence
+    packaging today (`project_name`, `default_source_folder`,
+    `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
+    `include_extensions`, `exclude_dirs`). `profiles.INERT_FIELDS` lists
+    seven fields that are stored and round-tripped but not yet honored by
+    the backend (`include_assets`, `copy_data_files`,
+    `spreadsheet_preview_rows`, `include_pdf_page_headers`,
+    `include_source_metadata`, `bundle_separator_style`, `create_zip`).
+  - Five built-in templates available via `get_built_in_profile(name)` and
+    `list_built_in_profiles()`: `ChatGPT Balanced Project`,
+    `Claude Full Project`, `Visual Repair Manual`, `RAG Ready Export`,
+    `Lean One-Shot Chat`. Each call returns an independent copy.
+  - Forward-compat: unknown JSON keys are dropped on load, a
+    `_schema_version` is written, and a corrupt file does not break
+    `list_profiles`.
+- Automated tests under `llm_project_packer/tests/`:
+  `test_pipeline.py` (2 cases) and `test_profiles.py` (26 cases) —
+  28 in total; passes with `python -m unittest discover -s tests` or
+  `pytest`.
 
 V2 should focus on:
 
@@ -73,7 +102,8 @@ V2 should focus on:
   and estimated bundle count;
 - export screen with progress events, result paths, and copy-friendly
   instruction text;
-- project profile save/load for repeated local workflows.
+- project profile UI: build the setup screen and per-screen forms on top
+  of `packer.profiles` (the storage layer is already shipped).
 
 Backend cleanup that still belongs in V2:
 
@@ -147,7 +177,8 @@ early.
 - Default to no comments. Only comment when WHY is non-obvious.
 - One responsibility per module. Keep `packer/` modules narrow:
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
-  `token_estimator`, `manifest`, `bundler`, `exporters`.
+  `token_estimator`, `manifest`, `bundler`, `exporters`, `pipeline`,
+  `profiles`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
@@ -186,7 +217,10 @@ Run from the repo root (`C:\Users\caleb\OneDrive\Desktop\Scripts\Fileslicer`):
 
 ```powershell
 # Imports parse and the estimator backend resolves
-.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import bundler, config, exporters, manifest, markdown_utils, presets, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
+.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import bundler, config, exporters, manifest, markdown_utils, pipeline, presets, profiles, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
+
+# All five built-in profile templates load and validate
+.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer.profiles import list_built_in_profiles, get_built_in_profile; [get_built_in_profile(n).validate() for n in list_built_in_profiles()]; print('built-ins ok:', list_built_in_profiles())"
 
 # Four target / mode combinations against the sample input
 python pack_project.py .\sample_input --target chatgpt --mode balanced --output .\test_output
@@ -286,6 +320,14 @@ Rules for output:
    manifest entry but the run continues). Anywhere a new I/O step is added,
    the same rule applies: catch per-file errors, record them in the manifest,
    keep going.
+
+5. **Profile fields are explicit about active vs inert.** Every field on
+   `packer.profiles.Profile` must appear in either `ACTIVE_FIELDS` (and be
+   wired through `Profile.to_packaging_kwargs` plus `run_packaging_job`) or
+   `INERT_FIELDS` (stored and round-tripped only). Saved JSON must round-trip
+   for every field on disk — never silently drop a known field. When wiring
+   an inert field, move its name from `INERT_FIELDS` to `ACTIVE_FIELDS` in
+   the same change and update `to_packaging_kwargs`.
 
 ## Definition of done for any feature
 
