@@ -29,14 +29,14 @@ Status legend: ✅ shipped · 🟡 in progress · ⚪ not started
 | 4 | ✅ | Streamlit project setup screen | `streamlit_app.py`, `requirements-ui.txt` | UI skeleton: built-in/saved profile selectors + setup/packaging/advanced/save sections |
 | 5 | ✅ | Source scan / audit screen | `streamlit_app.py` | Read-only scan dashboard |
 | 6 | ✅ | File review / include-exclude | `streamlit_app.py` | Session-state per-file selection for a future `included_files` hook |
-| 7 | ⚪ | Packaging settings screen | `streamlit_app.py` | Override surface + projected bundle count |
+| 7 | ✅ | Packaging settings screen | `streamlit_app.py` | Override surface + projected bundle count |
 | 8 | ✅ | Preview screen | `streamlit_app.py` | Selection-based summary + instruction preview + warnings |
 | 9 | ✅ | Export / progress / results | `streamlit_app.py` | Calls `run_packaging_job` with included files + progress + results |
 | 10 | 🟡 | README + manual test instructions | `README.md`, `CLAUDE.md` | Docs follow each shipped milestone |
 
 Notes since the original plan was written:
 
-- Milestones 1–6 and 8–9 are merged. The pipeline
+- Milestones 1–9 are merged. The pipeline
   signature settled on
   `run_packaging_job(source_dir, output_dir, project_name, target, mode,
   max_bundle_tokens=None, include_extensions=None, exclude_dirs=None,
@@ -59,6 +59,9 @@ Notes since the original plan was written:
   preview. Export calls `run_packaging_job` with `included_files`, displays
   progress messages, generated files, success/failure counts, and manual
   target-specific upload instructions. It does not automate upload.
+- Packaging settings shipped in `streamlit_app.py`: after scan/review it
+  shows target/mode, default budget, resolved budget, a max-token override,
+  rough selected-token estimate, and projected bundle count.
 - The "Advanced options" expander already binds every inert profile field
   (`include_assets`, `copy_data_files`, `spreadsheet_preview_rows`,
   `include_pdf_page_headers`, `include_source_metadata`,

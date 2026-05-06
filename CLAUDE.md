@@ -98,6 +98,10 @@ Already shipped:
   stores the `PackResult` in session state, lists generated files, shows
   success/failure counts, and renders target-specific manual upload
   instructions. It does not automate upload to any LLM.
+- Packaging settings in `streamlit_app.py`: after scan/review, the UI shows
+  target/mode, default token budget, resolved budget, max-token override,
+  rough selected-token estimate, and projected bundle count. Override values
+  are stored on the active `Profile` and passed to the export call.
 - Project profile storage in `packer/profiles.py`:
   - `Profile` dataclass (16 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
@@ -130,12 +134,6 @@ Already shipped:
 
 V2 should focus next on (in roughly this order):
 
-- **packaging settings screen** — surface the resolved per-bundle token
-  budget for the active target/mode plus the optional override; reuse
-  `presets.get_bundle_token_budget` and the existing modes (`lean`,
-  `balanced`, `full`, `visual_manual`). Clearer UI labels (ChatGPT Project,
-  Claude Project, one-shot chat, RAG-ready) are allowed as cosmetic
-  remappings of existing backend targets — do not invent new targets.
 - **profile UI extensions** — the project setup screen already exists;
   follow-ups bind the per-screen forms to the same `Profile` so a saved
   profile captures the user's full configuration including selection.

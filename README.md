@@ -63,11 +63,13 @@ UI flow:
 2. Set project name, source folder, output folder, target, and mode.
 3. Click `Scan Source Folder`.
 4. Review files and include/exclude what should be packed.
-5. Check the preview: included/skipped counts, target/mode, bundle budget,
+5. Adjust packaging settings, including the optional max-token override and
+   projected bundle count.
+6. Check the preview: included/skipped counts, target/mode, bundle budget,
    rough bundle count, output folder pattern, warnings, and instruction
    preview.
-6. Click `Create LLM Project Bundles`.
-7. Use the generated folder path and manual upload instructions shown after
+7. Click `Create LLM Project Bundles`.
+8. Use the generated folder path and manual upload instructions shown after
    export.
 
 Profiles are saved to `~/.llm_project_packer/profiles/`, the same location

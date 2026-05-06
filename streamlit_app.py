@@ -13,6 +13,7 @@ folders through the shared backend. The CLI (``pack_project.py``) is unchanged.
 from __future__ import annotations
 
 import inspect
+import os
 import sys
 import tempfile
 from collections import Counter, defaultdict
@@ -611,7 +612,7 @@ def _render_project_setup(profile: Profile) -> None:
 
 
 def _render_packaging(profile: Profile) -> None:
-    st.subheader("Packaging")
+    st.subheader("Packaging target")
     targets = list(presets.TARGETS)
     modes = list(presets.MODES)
 
@@ -630,27 +631,6 @@ def _render_packaging(profile: Profile) -> None:
             index=_safe_index(modes, profile.mode),
             key=_key("mode"),
         )
-
-    default_budget = presets.get_bundle_token_budget(profile.target, profile.mode)
-    use_override = st.checkbox(
-        "Override default bundle token budget",
-        value=profile.max_bundle_tokens is not None,
-        help=f"Default for {profile.target} / {profile.mode}: {default_budget:,}",
-        key=_key("use_max_bundle_tokens"),
-    )
-    if use_override:
-        profile.max_bundle_tokens = int(
-            st.number_input(
-                "Max bundle tokens",
-                min_value=1,
-                value=int(profile.max_bundle_tokens or default_budget),
-                step=1000,
-                key=_key("max_bundle_tokens"),
-            )
-        )
-    else:
-        profile.max_bundle_tokens = None
-        st.caption(f"Using default: {default_budget:,} tokens / bundle")
 
     include_csv = st.text_input(
         "Include extensions (comma-separated, leave blank for the default set)",
@@ -1007,7 +987,66 @@ def _render_file_review(
         if relative_path:
             selections[relative_path] = bool(record.get("include", False))
 
+    _render_packaging_settings(key, files, selections)
     _render_preview_and_export(key, files, selections)
+
+
+def _render_packaging_settings(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> None:
+    profile = _profile()
+    selected_files = _selected_files(files, selections)
+    default_budget = presets.get_bundle_token_budget(profile.target, profile.mode)
+    rough_tokens = _rough_token_estimate(selected_files)
+    widget_prefix = f"settings_{_scan_key_id(key)}"
+
+    st.subheader("Packaging settings")
+    st.caption(
+        "These settings control how selected files are split for export. "
+        "Token budgets are packaging targets, not official platform limits."
+    )
+
+    use_override = st.checkbox(
+        "Override bundle token budget",
+        value=profile.max_bundle_tokens is not None,
+        help=f"Default for {profile.target} / {profile.mode}: {default_budget:,}",
+        key=f"{widget_prefix}_use_max_bundle_tokens",
+    )
+    if use_override:
+        profile.max_bundle_tokens = int(
+            st.number_input(
+                "Max bundle tokens",
+                min_value=1,
+                value=int(profile.max_bundle_tokens or default_budget),
+                step=1000,
+                key=f"{widget_prefix}_max_bundle_tokens",
+            )
+        )
+    else:
+        profile.max_bundle_tokens = None
+
+    updated_budget = _resolved_max_bundle_tokens(profile)
+    updated_projection = _rough_bundle_count(
+        selected_files,
+        profile.target,
+        updated_budget,
+    )
+    col_target, col_default, col_current, col_projected = st.columns(4)
+    col_target.metric("Target / mode", f"{profile.target} / {profile.mode}")
+    col_default.metric("Default budget", f"{default_budget:,}")
+    col_current.metric("Resolved budget", f"{updated_budget:,}")
+    col_projected.metric(
+        "Projected bundles",
+        "RAG chunks" if updated_projection is None else updated_projection,
+    )
+    st.write(
+        f"Selected files: {len(selected_files)}. "
+        f"Rough selected-token estimate: {rough_tokens:,}. "
+        f"Projected export shape: "
+        f"{'RAG JSONL chunks' if updated_projection is None else str(updated_projection) + ' Markdown bundle(s)'}."
+    )
 
 
 def _render_preview_and_export(
@@ -1153,6 +1192,14 @@ def _render_export_result(target: str, result: PackResult) -> None:
 
     st.markdown("**Export folder**")
     st.code(str(result.export_dir), language="text")
+    if os.name == "nt" and st.button(
+        "Open export folder in Explorer",
+        key=f"open_export_{str(result.export_dir)}",
+    ):
+        try:
+            os.startfile(result.export_dir)  # type: ignore[attr-defined]
+        except OSError as exc:
+            st.warning(f"Could not open export folder: {exc}")
 
     rows = _generated_file_rows(result.export_dir)
     if rows:
