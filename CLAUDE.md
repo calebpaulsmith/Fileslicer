@@ -239,8 +239,9 @@ Already shipped:
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
   `test_pipeline.py` (24 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (31 cases) — 87 in
-  total; passes with `python -m unittest discover -s tests` or `pytest`.
+  `test_readers.py` (6 cases), `test_profiles.py` (31 cases), and
+  `test_bundler.py` (4 cases) — 91 in total; passes with
+  `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 
@@ -250,10 +251,16 @@ V2 should focus next on (in roughly this order):
 
 Backend cleanup that still belongs in V2:
 
-- Fix `bundler.Bundle.filename` so numeric prefixes remain correct past 9
-  bundles.
-- Replace any remaining direct pipeline printing with `ProgressEvent`
-  callbacks while preserving CLI output.
+- Bundle filename prefixes — done: `bundler.split_into_bundles` assigns every
+  bundle a shared `prefix_width`, and `Bundle.filename` keeps the documented
+  two-digit `02_`–`99_` prefixes (byte-identical output) up to 98 bundles.
+  Larger exports use width-uniform prefixes numbered from "02" zero-extended
+  (`020_BUNDLE_001.md`, …, `118_BUNDLE_099.md`, …) so bundles always sort
+  lexically after the `00_*` instructions and `01_SOURCE_MANIFEST.md` and in
+  bundle order; plain zero-padding (`002_`) would sort before `00_*`.
+- Pipeline printing — done: `packer/` contains no direct `print` calls; the
+  pipeline emits `ProgressEvent`s and the CLI renders them via its
+  `_print_progress` callback.
 - Keep tests and CLI smoke commands passing after every milestone.
 
 V2 should not attempt OCR, embeddings, vector databases, automated upload,
