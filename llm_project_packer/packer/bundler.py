@@ -31,11 +31,16 @@ class Bundle:
 
     index: int  # 1-based
     docs: List[ConvertedDoc] = field(default_factory=list)
+    prefix_width: int = 2
 
     @property
     def filename(self) -> str:
-        # Bundles get sequential numeric prefixes starting at 02_ (the manifest is 01_).
-        return f"{(self.index + 1):02d}_BUNDLE_{self.index:03d}.md"
+        # Bundles get sequential numeric prefixes starting at 02_ (the manifest is
+        # 01_). When an export needs wider prefixes, numbering starts at "02"
+        # zero-extended (020, 021, ...) so every bundle still sorts after the
+        # 00_* instructions and 01_* manifest; plain zero-padding (002) would not.
+        prefix = 2 * 10 ** (self.prefix_width - 2) + self.index - 1
+        return f"{prefix:0{self.prefix_width}d}_BUNDLE_{self.index:03d}.md"
 
     @property
     def name(self) -> str:
@@ -80,6 +85,12 @@ def split_into_bundles(
 
     if current.docs:
         bundles.append(current)
+
+    prefix_width = 2
+    while 2 * 10 ** (prefix_width - 2) + len(bundles) - 1 > 10**prefix_width - 1:
+        prefix_width += 1
+    for bundle in bundles:
+        bundle.prefix_width = prefix_width
 
     return bundles
 
