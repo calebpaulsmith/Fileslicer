@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from fnmatch import fnmatchcase
+from typing import List, Optional, Sequence, Tuple
 
 from .token_estimator import estimate_tokens
 
@@ -244,6 +245,22 @@ def analyze_markdown_structure(text: str) -> ChunkStructure:
         paragraph_count=paragraph_count,
         list_item_count=list_items,
         table_row_count=table_rows,
+    )
+
+
+def match_heading_patterns(heading: str, patterns: Sequence[str]) -> Tuple[str, ...]:
+    """Return the patterns that match ``heading``.
+
+    Matching is case-insensitive and glob-style (``*`` wildcards, e.g.
+    ``*_html``). Blank patterns and blank headings never match.
+    """
+    if not heading or not heading.strip():
+        return ()
+    candidate = heading.strip().lower()
+    return tuple(
+        pattern
+        for pattern in patterns
+        if pattern and pattern.strip() and fnmatchcase(candidate, pattern.strip().lower())
     )
 
 

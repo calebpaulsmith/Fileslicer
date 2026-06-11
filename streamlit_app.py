@@ -33,6 +33,7 @@ from packer.chunking import (  # noqa: E402
     DEFAULT_HEADING_LEVEL,
     STRATEGY_HEADINGS,
     STRATEGY_TOKENS,
+    match_heading_patterns,
 )
 from packer.exporters import InstructionContext, write_instructions  # noqa: E402
 from packer.markdown_utils import safe_filename  # noqa: E402
@@ -1095,6 +1096,14 @@ def _export_chunk_selections(
     return partial, budget, strategy, heading_level
 
 
+def _chunk_rule_patterns(profile: Profile) -> Tuple[str, ...]:
+    return tuple(
+        pattern.strip()
+        for pattern in profile.chunk_exclude_headings
+        if pattern and pattern.strip()
+    )
+
+
 def _render_chunk_review(
     key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
     files: Sequence[ScannedFile],
@@ -1107,6 +1116,24 @@ def _render_chunk_review(
         "chunk selection are exported in full. Previews convert one file at a "
         "time in a temporary workspace; nothing is written to the output folder."
     )
+
+    profile = _profile()
+    rules_csv = st.text_input(
+        "Corpus chunk rules: exclude chunks whose first heading matches "
+        "(comma-separated, * wildcards)",
+        value=_list_to_csv(profile.chunk_exclude_headings),
+        help=(
+            "Applied to every document at export — no per-document clicking. "
+            "Example for scraped records: url, slug, content_hash, *_html, "
+            "discovered_links. Matching is case-insensitive against each "
+            "chunk's first heading, so it works best with the heading "
+            "strategy. A per-document chunk selection overrides these rules "
+            "for that document. Saved with the profile."
+        ),
+        key=_key("chunk_exclude_headings"),
+    )
+    profile.chunk_exclude_headings = _csv_to_list(rules_csv)
+    rules = _chunk_rule_patterns(profile)
 
     eligible = [
         scanned
@@ -1173,6 +1200,7 @@ def _render_chunk_review(
             int(state.get("budget", -1)) != budget  # type: ignore[arg-type]
             or str(state.get("strategy", STRATEGY_TOKENS)) != strategy
             or int(state.get("heading_level", DEFAULT_HEADING_LEVEL)) != heading_level  # type: ignore[arg-type]
+            or tuple(state.get("rules", ())) != rules  # type: ignore[arg-type]
         )
     ]
     for relative_path in stale_paths:
@@ -1183,7 +1211,9 @@ def _render_chunk_review(
             "under different chunk settings."
         )
 
-    _render_corpus_chunk_audit(key, eligible, budget, strategy, heading_level, widget_prefix)
+    _render_corpus_chunk_audit(
+        key, eligible, budget, strategy, heading_level, rules, widget_prefix
+    )
 
     paths = [str(scanned.relative_path) for scanned in eligible]
     chosen = st.selectbox("Document", options=paths, key=f"{widget_prefix}_doc")
@@ -1210,7 +1240,15 @@ def _render_chunk_review(
     preview = cache.get(cache_key)
     if isinstance(preview, DocumentChunkPreview):
         _render_chunk_editor(
-            key, chosen, budget, strategy, heading_level, preview, store, widget_prefix
+            key,
+            chosen,
+            budget,
+            strategy,
+            heading_level,
+            rules,
+            preview,
+            store,
+            widget_prefix,
         )
     else:
         st.info("Click Preview chunks to convert this document and list its chunks.")
@@ -1241,6 +1279,7 @@ def _render_corpus_chunk_audit(
     budget: int,
     strategy: str,
     heading_level: int,
+    rules: Tuple[str, ...],
     widget_prefix: str,
 ) -> None:
     with st.expander("Corpus chunking audit", expanded=False):
@@ -1285,6 +1324,30 @@ def _render_corpus_chunk_audit(
             )
             return
         _render_corpus_audit_results(previews, budget)
+
+        if rules:
+            all_chunks = [
+                chunk
+                for preview in previews.values()
+                if preview.status == "ok"
+                for chunk in preview.chunks
+            ]
+            rule_rows = []
+            for pattern in rules:
+                matches = sum(
+                    1
+                    for chunk in all_chunks
+                    if match_heading_patterns(chunk.first_heading, (pattern,))
+                )
+                rule_rows.append({"rule": pattern, "matching_chunks": matches})
+            st.markdown("**Corpus chunk rules**")
+            st.dataframe(rule_rows, hide_index=True, **_dataframe_layout_kwargs())
+            unmatched = [row["rule"] for row in rule_rows if not row["matching_chunks"]]
+            if unmatched:
+                st.warning(
+                    "Rule(s) matching no chunks at the current settings: "
+                    + ", ".join(repr(rule) for rule in unmatched)
+                )
 
         tips = chunking_guidance(previews, budget, strategy, _profile().target)
         st.markdown("**Chunking guidance**")
@@ -1380,6 +1443,7 @@ def _render_chunk_editor(
     budget: int,
     strategy: str,
     heading_level: int,
+    rules: Tuple[str, ...],
     preview: DocumentChunkPreview,
     store: Dict[str, Dict[str, object]],
     widget_prefix: str,
@@ -1396,11 +1460,24 @@ def _render_chunk_editor(
 
     state = store.get(relative_path)
     if state is None or int(state.get("total", -1)) != len(preview.chunks):  # type: ignore[arg-type]
+        default_selected = [
+            chunk.index
+            for chunk in preview.chunks
+            if not match_heading_patterns(chunk.first_heading, rules)
+        ]
+        rule_excluded = len(preview.chunks) - len(default_selected)
+        if rule_excluded:
+            st.info(
+                f"{rule_excluded} chunk(s) default to excluded because their "
+                "heading matches a corpus chunk rule. Re-include any of them "
+                "to override the rules for this document."
+            )
         state = {
             "budget": budget,
             "strategy": strategy,
             "heading_level": heading_level,
-            "selected": list(range(1, len(preview.chunks) + 1)),
+            "rules": list(rules),
+            "selected": default_selected,
             "total": len(preview.chunks),
         }
         store[relative_path] = state
@@ -1621,6 +1698,13 @@ def _render_preview_and_export(
             f"{chunk_token_budget:,} tokens per chunk, "
             f"{CHUNK_STRATEGY_LABELS.get(chunk_strategy, chunk_strategy)} strategy."
         )
+    chunk_rules = _chunk_rule_patterns(profile)
+    if chunk_rules:
+        warnings.append(
+            f"Corpus chunk rules active ({len(chunk_rules)} pattern(s)): chunks "
+            "whose first heading matches are excluded from every document "
+            "without a per-document chunk selection."
+        )
     instruction_preview, instruction_warnings = _instruction_preview(
         profile,
         selected_files,
@@ -1676,6 +1760,7 @@ def _render_preview_and_export(
             chunk_token_budget=chunk_token_budget,
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
+            chunk_exclude_headings=list(chunk_rules),
         )
 
     last_result = st.session_state.get(SESSION_KEY_LAST_EXPORT_RESULT)
@@ -1692,6 +1777,7 @@ def _run_export(
     chunk_token_budget: int | None = None,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_exclude_headings: List[str] | None = None,
 ) -> None:
     source_dir = _resolved_source_path(profile)
     output_dir = _resolved_output_path(profile)
@@ -1736,6 +1822,7 @@ def _run_export(
             chunk_token_budget=chunk_token_budget,
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
+            chunk_exclude_headings=chunk_exclude_headings or None,
             progress_callback=on_progress,
         )
     except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI

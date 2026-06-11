@@ -108,6 +108,7 @@ class ProfileDataclassTests(ProfilesTestCase):
             "max_bundle_tokens",
             "include_extensions",
             "exclude_dirs",
+            "chunk_exclude_headings",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -138,7 +139,34 @@ class ProfileDataclassTests(ProfilesTestCase):
         kwargs = profile.to_packaging_kwargs()
         self.assertIsNone(kwargs["include_extensions"])
         self.assertIsNone(kwargs["exclude_dirs"])
+        self.assertIsNone(kwargs["chunk_exclude_headings"])
         self.assertIsNone(kwargs["max_bundle_tokens"])
+
+    def test_chunk_exclude_headings_round_trip_and_kwargs(self) -> None:
+        root = self.make_tempdir()
+        try:
+            profile = Profile(
+                profile_name="Rules Sample",
+                default_source_folder="C:/src",
+                chunk_exclude_headings=["*_html", "content_hash"],
+            )
+            save_profile(profile, profiles_dir=root)
+            loaded = load_profile("Rules Sample", profiles_dir=root)
+            self.assertEqual(
+                loaded.chunk_exclude_headings, ["*_html", "content_hash"]
+            )
+            kwargs = loaded.to_packaging_kwargs()
+            self.assertEqual(
+                kwargs["chunk_exclude_headings"], ["*_html", "content_hash"]
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_rejects_non_list_chunk_exclude_headings(self) -> None:
+        profile = Profile(profile_name="x")
+        profile.chunk_exclude_headings = "not-a-list"  # type: ignore[assignment]
+        with self.assertRaises(ValueError):
+            profile.validate()
 
     def test_to_packaging_kwargs_requires_source(self) -> None:
         profile = Profile(profile_name="p")  # no default source, no override
