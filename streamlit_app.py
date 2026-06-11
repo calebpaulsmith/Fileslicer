@@ -60,6 +60,7 @@ SESSION_KEY_FILE_SELECTION_REVISIONS = "file_review_selection_revisions"
 SESSION_KEY_CHUNK_SELECTIONS = "chunk_review_selections"
 SESSION_KEY_CHUNK_PREVIEWS = "chunk_preview_cache"
 SESSION_KEY_CHUNK_REVISIONS = "chunk_review_revisions"
+SESSION_KEY_CORPUS_AUDIT = "corpus_chunk_audit"
 SESSION_KEY_LAST_EXPORT_RESULT = "last_export_result"
 BUNDLE_SEPARATOR_OPTIONS = ("comment", "rule", "blank")
 FILE_TYPE_ORDER = ("text", "html", "pdf", "docx", "csv", "xlsx", "image", "unsupported")
@@ -95,6 +96,8 @@ def _ensure_session_state() -> None:
         st.session_state[SESSION_KEY_CHUNK_PREVIEWS] = {}
     if SESSION_KEY_CHUNK_REVISIONS not in st.session_state:
         st.session_state[SESSION_KEY_CHUNK_REVISIONS] = {}
+    if SESSION_KEY_CORPUS_AUDIT not in st.session_state:
+        st.session_state[SESSION_KEY_CORPUS_AUDIT] = {}
     if SESSION_KEY_LAST_EXPORT_RESULT not in st.session_state:
         st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = None
 
@@ -1110,6 +1113,8 @@ def _render_chunk_review(
             "at a different chunk size."
         )
 
+    _render_corpus_chunk_audit(key, eligible, budget, widget_prefix)
+
     paths = [str(scanned.relative_path) for scanned in eligible]
     chosen = st.selectbox("Document", options=paths, key=f"{widget_prefix}_doc")
     scanned = next(s for s in eligible if str(s.relative_path) == chosen)
@@ -1137,6 +1142,139 @@ def _render_chunk_review(
         st.info("Click Preview chunks to convert this document and list its chunks.")
 
     _render_chunk_summary(key, store, widget_prefix)
+
+
+def _corpus_audit_key(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    budget: int,
+    eligible: Sequence[ScannedFile],
+) -> Tuple[str, int, str]:
+    paths = tuple(sorted(str(scanned.relative_path) for scanned in eligible))
+    return (
+        _selection_store_key(key),
+        budget,
+        sha1(repr(paths).encode("utf-8")).hexdigest()[:12],
+    )
+
+
+def _render_corpus_chunk_audit(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    eligible: Sequence[ScannedFile],
+    budget: int,
+    widget_prefix: str,
+) -> None:
+    with st.expander("Corpus chunking audit", expanded=False):
+        st.caption(
+            "Converts every included document and chunks it at the current "
+            "chunk size, so you can see how the chunker behaves across the "
+            "whole corpus — where boundaries land and why — before reviewing "
+            "individual documents."
+        )
+        audit_store = st.session_state[SESSION_KEY_CORPUS_AUDIT]
+        audit_key = _corpus_audit_key(key, budget, eligible)
+        if st.button(
+            f"Analyze corpus chunking ({len(eligible)} document(s))",
+            key=f"{widget_prefix}_corpus",
+        ):
+            source_root = _resolved_source_path(_profile())
+            cache = st.session_state[SESSION_KEY_CHUNK_PREVIEWS]
+            progress = st.progress(0)
+            previews: Dict[str, DocumentChunkPreview] = {}
+            for position, scanned in enumerate(eligible, start=1):
+                relative_path = str(scanned.relative_path)
+                cache_key = (_selection_store_key(key), relative_path, budget)
+                if cache_key not in cache:
+                    cache[cache_key] = preview_document_chunks(
+                        scanned, source_root, budget
+                    )
+                previews[relative_path] = cache[cache_key]
+                progress.progress(int(position / len(eligible) * 100))
+            audit_store[audit_key] = previews
+            progress.empty()
+
+        previews = audit_store.get(audit_key)
+        if previews is None:
+            st.caption(
+                "Not analyzed yet for the current scan, selection, and chunk size."
+            )
+            return
+        _render_corpus_audit_results(previews, budget)
+
+
+def _render_corpus_audit_results(
+    previews: Dict[str, DocumentChunkPreview],
+    budget: int,
+) -> None:
+    converted = {
+        path: preview for path, preview in previews.items() if preview.status == "ok"
+    }
+    failed = {
+        path: preview for path, preview in previews.items() if preview.status != "ok"
+    }
+    all_chunks = [chunk for preview in converted.values() for chunk in preview.chunks]
+    over_budget = sum(1 for chunk in all_chunks if chunk.token_estimate > budget)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Documents analyzed", len(previews))
+    metric_cols[1].metric("Total chunks", len(all_chunks))
+    metric_cols[2].metric(
+        "Total tokens",
+        f"{sum(chunk.token_estimate for chunk in all_chunks):,}",
+    )
+    metric_cols[3].metric("Chunks over budget", over_budget)
+
+    if all_chunks:
+        sizes = sorted(chunk.token_estimate for chunk in all_chunks)
+        st.write(
+            f"Chunk sizes (tokens): smallest {sizes[0]:,}, "
+            f"median {sizes[len(sizes) // 2]:,}, largest {sizes[-1]:,} "
+            f"against a budget of {budget:,}."
+        )
+
+        reason_counts = Counter(chunk.boundary_reason for chunk in all_chunks)
+        st.markdown("**Why chunk boundaries were drawn**")
+        st.dataframe(
+            [
+                {"boundary_reason": reason, "chunks": count}
+                for reason, count in reason_counts.most_common()
+            ],
+            hide_index=True,
+            **_dataframe_layout_kwargs(),
+        )
+
+    st.markdown("**Per-document chunking**")
+    st.dataframe(
+        [
+            {
+                "relative_path": path,
+                "chunks": len(preview.chunks),
+                "tokens": preview.total_tokens,
+                "largest_chunk": max(
+                    (chunk.token_estimate for chunk in preview.chunks), default=0
+                ),
+                "over_budget_chunks": sum(
+                    1 for chunk in preview.chunks if chunk.token_estimate > budget
+                ),
+                "headings": sum(
+                    len(chunk.structure.headings)
+                    for chunk in preview.chunks
+                    if chunk.structure
+                ),
+                "single_chunk": len(preview.chunks) == 1,
+            }
+            for path, preview in sorted(converted.items())
+        ],
+        hide_index=True,
+        **_dataframe_layout_kwargs(),
+    )
+    if over_budget:
+        st.warning(
+            f"{over_budget} chunk(s) exceed the budget. These come from single "
+            "lines (often tables or long list rows) that cannot be split at a "
+            "paragraph or line boundary."
+        )
+    for path, preview in sorted(failed.items()):
+        st.warning(f"Could not convert {path} (status: {preview.status}). {preview.notes}")
 
 
 def _render_chunk_editor(
@@ -1177,11 +1315,21 @@ def _render_chunk_editor(
         _bump_chunk_revision(key, relative_path)
         st.rerun()
 
+    st.caption(
+        "How chunks are made: paragraphs are appended in order until the next "
+        "paragraph would push the chunk over the token budget; a paragraph "
+        "bigger than the budget on its own is split at line boundaries. Each "
+        "row shows the structure a chunk contains and why its boundary was "
+        "drawn — use this to judge whether the chunk size suits the corpus."
+    )
     rows = [
         {
             "include": chunk.index in selected_set,
             "chunk": chunk.index,
             "tokens": chunk.token_estimate,
+            "heading": chunk.first_heading,
+            "structure": chunk.structure.describe() if chunk.structure else "",
+            "boundary": chunk.boundary_reason,
             "preview": _chunk_preview_text(chunk.text),
         }
         for chunk in preview.chunks
@@ -1199,9 +1347,12 @@ def _render_chunk_editor(
             "include": st.column_config.CheckboxColumn("include"),
             "chunk": st.column_config.NumberColumn("chunk", format="%d"),
             "tokens": st.column_config.NumberColumn("tokens", format="%d"),
+            "heading": st.column_config.TextColumn("heading"),
+            "structure": st.column_config.TextColumn("structure"),
+            "boundary": st.column_config.TextColumn("boundary"),
             "preview": st.column_config.TextColumn("preview"),
         },
-        disabled=["chunk", "tokens", "preview"],
+        disabled=["chunk", "tokens", "heading", "structure", "boundary", "preview"],
     )
     state["selected"] = sorted(
         int(record["chunk"])
@@ -1229,8 +1380,10 @@ def _render_chunk_editor(
     with st.expander("View chunk text", expanded=False):
         for chunk in preview.chunks:
             marker = "included" if chunk.index in selected_now else "excluded"
+            details = chunk.structure.describe() if chunk.structure else ""
             st.markdown(
-                f"**Chunk {chunk.index}** — {chunk.token_estimate:,} tokens, {marker}"
+                f"**Chunk {chunk.index}** — {chunk.token_estimate:,} tokens, "
+                f"{marker} · {details} · boundary: {chunk.boundary_reason}"
             )
             st.code(chunk.text[:5000], language="markdown")
 

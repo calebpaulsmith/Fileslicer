@@ -111,7 +111,17 @@ Already shipped:
   chunks via `pipeline.preview_document_chunks(...)` (conversion happens in
   a temporary workspace using a fixed-width `DOC_0000` placeholder id so
   asset links don't shift chunk boundaries), and toggles per-chunk include
-  flags. Selections live in `st.session_state["chunk_review_selections"]`
+  flags. Chunking behavior is transparent: every chunk carries a
+  `boundary_reason` (one of the `chunking.REASON_*` constants explaining why
+  its boundary was drawn) and a `ChunkStructure` summary (headings,
+  paragraph/list-item/table-row counts via
+  `chunking.analyze_markdown_structure`, skipping fenced code). The chunk
+  table shows heading, structure, and boundary columns, and a "Corpus
+  chunking audit" expander converts every included document at the current
+  chunk size to show corpus-wide totals, size distribution, a
+  boundary-reason breakdown, per-document chunk stats, and over-budget
+  chunk warnings — this is the V2 seed for V3 chunking-strategy rules.
+  Selections live in `st.session_state["chunk_review_selections"]`
   as `{repr(scan_key): {relative_path: {"budget", "selected", "total"}}}`;
   changing the chunk size clears selections made at a different size.
   Export passes partial selections to
@@ -150,8 +160,8 @@ Already shipped:
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (6 cases), `test_chunking.py` (8 cases), and
-  `test_profiles.py` (26 cases) — 40 in total; passes with
+  `test_pipeline.py` (6 cases), `test_chunking.py` (15 cases), and
+  `test_profiles.py` (26 cases) — 47 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -321,8 +331,14 @@ Manual Streamlit inputs and expected outputs:
   removed paths disappear from the selection state.
 - In `Document chunk review`, set `Chunk size (tokens)` to `50`, pick a
   multi-paragraph document, click `Preview chunks`.
-  Expected: the chunk table lists every chunk with token estimates and all
-  chunks default included; `Selected tokens` equals the document total.
+  Expected: the chunk table lists every chunk with token estimates, first
+  heading, structure summary, and boundary reason; all chunks default
+  included and `Selected tokens` equals the document total.
+- Open `Corpus chunking audit`, click `Analyze corpus chunking`.
+  Expected: totals for documents/chunks/tokens, smallest/median/largest
+  chunk sizes, a boundary-reason breakdown table, a per-document table with
+  chunk counts and over-budget flags, and a warning when any chunk exceeds
+  the budget (long unbreakable lines).
 - Uncheck one chunk, then export.
   Expected: the preview warns that one document has a partial chunk
   selection, the bundle omits the deselected chunk's text, and the manifest

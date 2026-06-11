@@ -65,8 +65,12 @@ UI flow:
 4. Review files and include/exclude what should be packed.
 5. Optionally open `Document chunk review`, preview how an included document
    splits into token-sized chunks, and deselect the portions you don't want
-   exported. Documents without a chunk selection export in full; trimmed
-   documents are noted in the manifest.
+   exported. Each chunk shows its first heading, a structure summary
+   (headings, paragraphs, list items, table rows), and the reason its
+   boundary was drawn, and a corpus chunking audit shows how the current
+   chunk size behaves across every included document — use these to tune
+   the chunk size before exporting. Documents without a chunk selection
+   export in full; trimmed documents are noted in the manifest.
 6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
 7. Check the preview: included/skipped counts, target/mode, bundle budget,
