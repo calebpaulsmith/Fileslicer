@@ -1739,9 +1739,9 @@ def _render_preview_and_export(
             f"{len(chunk_selections)} document(s) have partial chunk selections; "
             "their content will be trimmed at export."
         )
-    if profile.target == "rag" and chunk_token_budget is not None:
+    if profile.target in ("rag", "cowork") and chunk_token_budget is not None:
         warnings.append(
-            "RAG chunks.jsonl will use the chunk review settings: "
+            "rag_ready/chunks.jsonl will use the chunk review settings: "
             f"{chunk_token_budget:,} tokens per chunk, "
             f"{CHUNK_STRATEGY_LABELS.get(chunk_strategy, chunk_strategy)} strategy."
         )

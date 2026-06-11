@@ -128,6 +128,29 @@ class PipelineTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_cowork_server_script_survives_hostile_project_name(self) -> None:
+        import ast
+
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "doc.txt").write_text("Some content.", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                project_name='evil """ name \\ with "quotes"',
+                target="cowork",
+                mode="balanced",
+            )
+
+            server_path = result.export_dir / "mcp_server" / "server.py"
+            ast.parse(server_path.read_text(encoding="utf-8"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_included_files_limits_packaging_scope(self) -> None:
         root = self.make_tempdir()
         try:
