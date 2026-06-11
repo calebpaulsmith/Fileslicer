@@ -180,8 +180,22 @@ Already shipped:
   `RAG Ready Export` built-in template now sets `chunk_token_budget=800`,
   so running it via `to_packaging_kwargs` produces retrieval-sized chunks
   by default.
+- Profile-bound file review selection: `Profile.exclude_files` (active
+  field) holds case-insensitive glob patterns matched by
+  `scanner.match_path_patterns` against source-relative POSIX paths.
+  `run_packaging_job(exclude_files=...)` drops matching files after the
+  scan so they never appear in the manifest; patterns matching nothing
+  warn without failing. `included_files` is an explicit allowlist that
+  already encodes exclusions, so callers pass one or the other — the UI
+  export keeps passing `included_files`, while profile-driven runs use
+  `exclude_files`. In file review, deselecting a supported file writes
+  its exact path back to the profile and a fresh scan defaults files
+  matching the profile patterns to excluded (per-scan selections still
+  win); hand-written globs in profile JSON are honored at scan defaults
+  and profile-driven exports but the UI rewrites the list with exact
+  paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (20 fields total) + `save_profile`,
+  - `Profile` dataclass (21 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -190,11 +204,12 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the twelve fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the thirteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
-    `include_extensions`, `exclude_dirs`, `chunk_exclude_headings`,
-    `chunk_token_budget`, `chunk_strategy`, `chunk_heading_level`).
+    `include_extensions`, `exclude_dirs`, `exclude_files`,
+    `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
+    `chunk_heading_level`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -215,15 +230,15 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (19 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (30 cases) — 81 in
+  `test_pipeline.py` (22 cases), `test_chunking.py` (26 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (31 cases) — 85 in
   total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 
-- **profile UI extensions** — chunk settings and rules are now bound to
-  the `Profile`; the remaining gap is capturing the file review selection
-  so a saved profile records which files were included or excluded.
+- **profile UI extensions** — done: chunk settings, chunk rules, and the
+  file review selection (`exclude_files`) are all bound to the `Profile`,
+  so a saved profile captures the user's full configuration.
 
 Backend cleanup that still belongs in V2:
 
@@ -428,6 +443,12 @@ Manual Streamlit inputs and expected outputs:
   Expected: `Chunk size (tokens)` shows `800` from the profile; changing
   strategy/size/level updates the profile, and `Save profile` round-trips
   the chunk settings so a reloaded profile restores them.
+- Exclude a supported file in file review, save the profile, load it
+  fresh, and scan again.
+  Expected: the profile JSON lists the path under `exclude_files`, the
+  fresh scan defaults that file to excluded while new files stay
+  included, and a profile-driven export (`to_packaging_kwargs`) omits the
+  file from the manifest entirely.
 
 After a run, inspect the newest folder under `.\test_output\`:
 

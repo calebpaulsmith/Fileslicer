@@ -387,6 +387,87 @@ class ChunkRuleTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class ExcludeFilesTests(unittest.TestCase):
+    def make_tempdir(self) -> Path:
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        path = TEST_TMP_ROOT / f"case_{uuid.uuid4().hex}"
+        path.mkdir()
+        return path
+
+    def test_exclude_files_drops_matching_paths_from_manifest(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "keep.txt").write_text("Keep me.", encoding="utf-8")
+            (source / "drop.txt").write_text("Drop me.", encoding="utf-8")
+            (source / "draft_a.md").write_text("Draft A.", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                exclude_files=["drop.txt", "draft_*"],
+            )
+
+            self.assertEqual(result.processed_count, 1)
+            manifest_text = result.manifest_paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("keep.txt", manifest_text)
+            self.assertNotIn("drop.txt", manifest_text)
+            self.assertNotIn("draft_a.md", manifest_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_unmatched_exclude_pattern_warns_without_failing(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "keep.txt").write_text("Keep me.", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                exclude_files=["missing.txt"],
+            )
+            self.assertEqual(result.processed_count, 1)
+            self.assertTrue(
+                any("matched no files" in w for w in result.warnings)
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_profile_exclude_files_drive_export(self) -> None:
+        from packer.profiles import Profile
+
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "keep.txt").write_text("Keep me.", encoding="utf-8")
+            (source / "drop.txt").write_text("Drop me.", encoding="utf-8")
+
+            profile = Profile(
+                profile_name="With exclusions",
+                exclude_files=["drop.txt"],
+            )
+            result = run_packaging_job(
+                **profile.to_packaging_kwargs(source_dir=source, output_dir=output)
+            )
+            self.assertEqual(result.processed_count, 1)
+            bundle_text = result.bundle_paths[0].read_text(encoding="utf-8")
+            self.assertIn("Keep me.", bundle_text)
+            self.assertNotIn("Drop me.", bundle_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class ProfileDrivenExportTests(unittest.TestCase):
     def make_tempdir(self) -> Path:
         TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)

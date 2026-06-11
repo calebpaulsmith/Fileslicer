@@ -54,7 +54,7 @@ from packer.profiles import (  # noqa: E402
     load_profile,
     save_profile,
 )
-from packer.scanner import ScannedFile, scan_directory  # noqa: E402
+from packer.scanner import ScannedFile, match_path_patterns, scan_directory  # noqa: E402
 
 
 PAGE_TITLE = "llm_project_packer"
@@ -255,16 +255,29 @@ def _selection_store_key(
     return repr(key)
 
 
+def _default_file_included(
+    scanned: ScannedFile,
+    exclude_patterns: Sequence[str],
+) -> bool:
+    if not _is_supported(scanned):
+        return False
+    return not match_path_patterns(scanned.relative_path, exclude_patterns)
+
+
 def _reconcile_file_selections(
     key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
     files: Sequence[ScannedFile],
+    exclude_patterns: Sequence[str] = (),
 ) -> Dict[str, bool]:
     store = st.session_state[SESSION_KEY_FILE_SELECTIONS]
     store_key = _selection_store_key(key)
     previous = store.get(store_key, {})
     current = {
         str(scanned.relative_path): bool(
-            previous.get(str(scanned.relative_path), _is_supported(scanned))
+            previous.get(
+                str(scanned.relative_path),
+                _default_file_included(scanned, exclude_patterns),
+            )
         )
         for scanned in files
     }
@@ -892,7 +905,13 @@ def _render_file_review(
 ) -> None:
     st.subheader("File review")
 
-    selections = _reconcile_file_selections(key, files)
+    profile = _profile()
+    selections = _reconcile_file_selections(key, files, profile.exclude_files)
+    st.caption(
+        "Excluded supported files are saved to the profile as `exclude_files`, "
+        "so a saved profile re-applies this selection on the next scan and on "
+        "profile-driven exports."
+    )
     included_count = sum(1 for included in selections.values() if included)
     supported_count = sum(1 for scanned in files if _is_supported(scanned))
     unsupported_count = len(files) - supported_count
@@ -1026,6 +1045,13 @@ def _render_file_review(
         relative_path = _record_path(record)
         if relative_path:
             selections[relative_path] = bool(record.get("include", False))
+
+    profile.exclude_files = sorted(
+        str(scanned.relative_path)
+        for scanned in files
+        if _is_supported(scanned)
+        and not selections.get(str(scanned.relative_path), True)
+    )
 
     _render_chunk_review(key, files, selections)
     _render_packaging_settings(key, files, selections)

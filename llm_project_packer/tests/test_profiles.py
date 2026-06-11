@@ -108,6 +108,7 @@ class ProfileDataclassTests(ProfilesTestCase):
             "max_bundle_tokens",
             "include_extensions",
             "exclude_dirs",
+            "exclude_files",
             "chunk_exclude_headings",
             "chunk_token_budget",
             "chunk_strategy",
@@ -142,8 +143,25 @@ class ProfileDataclassTests(ProfilesTestCase):
         kwargs = profile.to_packaging_kwargs()
         self.assertIsNone(kwargs["include_extensions"])
         self.assertIsNone(kwargs["exclude_dirs"])
+        self.assertIsNone(kwargs["exclude_files"])
         self.assertIsNone(kwargs["chunk_exclude_headings"])
         self.assertIsNone(kwargs["max_bundle_tokens"])
+
+    def test_exclude_files_round_trip_and_kwargs(self) -> None:
+        root = self.make_tempdir()
+        try:
+            profile = Profile(
+                profile_name="Exclude Files Sample",
+                default_source_folder="C:/src",
+                exclude_files=["notes/draft.txt", "*.tmp"],
+            )
+            save_profile(profile, profiles_dir=root)
+            loaded = load_profile("Exclude Files Sample", profiles_dir=root)
+            self.assertEqual(loaded.exclude_files, ["notes/draft.txt", "*.tmp"])
+            kwargs = loaded.to_packaging_kwargs()
+            self.assertEqual(kwargs["exclude_files"], ["notes/draft.txt", "*.tmp"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
         self.assertIsNone(kwargs["chunk_token_budget"])
         self.assertEqual(kwargs["chunk_strategy"], "tokens")
         self.assertEqual(kwargs["chunk_heading_level"], 2)
