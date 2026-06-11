@@ -15,8 +15,8 @@ Status:
   chunks.
 - **Version 2 UI:** in progress but usable for local preview/export. The
   Streamlit app can load/save profiles, scan/audit sources, review included
-  files, preview the planned export, and create bundles through the shared
-  backend.
+  files, review per-document chunks and deselect unwanted portions, preview
+  the planned export, and create bundles through the shared backend.
 
 Everything is local. The tool does not upload files, automate logins, drive a
 browser, run OCR, create embeddings, or host a server.
@@ -63,13 +63,26 @@ UI flow:
 2. Set project name, source folder, output folder, target, and mode.
 3. Click `Scan Source Folder`.
 4. Review files and include/exclude what should be packed.
-5. Adjust packaging settings, including the optional max-token override and
+5. Optionally open `Document chunk review`, pick a chunking strategy —
+   token packing or heading sections (a new chunk at every heading of the
+   chosen level) — preview how an included document splits into chunks, and
+   deselect the portions you don't want exported. Each chunk shows its
+   first heading, a structure summary (headings, paragraphs, list items,
+   table rows), and the reason its boundary was drawn. The corpus chunking
+   audit applies the current settings to every included document and adds
+   `Chunking guidance`: plain-language tips on over-budget chunks,
+   heading-rich corpora, boilerplate sections, and RAG-friendly chunk
+   sizes. For RAG exports, `rag_ready/chunks.jsonl` uses the reviewed chunk
+   settings, and `00_RAG_EXPORT_NOTES.md` includes retrieval-optimization
+   tips. Documents without a chunk selection export in full; trimmed
+   documents are noted in the manifest.
+6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
-6. Check the preview: included/skipped counts, target/mode, bundle budget,
+7. Check the preview: included/skipped counts, target/mode, bundle budget,
    rough bundle count, output folder pattern, warnings, and instruction
    preview.
-7. Click `Create LLM Project Bundles`.
-8. Use the generated folder path and manual upload instructions shown after
+8. Click `Create LLM Project Bundles`.
+9. Use the generated folder path and manual upload instructions shown after
    export.
 
 Profiles are saved to `~/.llm_project_packer/profiles/`, the same location
@@ -108,6 +121,9 @@ Spreadsheets and data:
 
 - `.csv`
 - `.xlsx`
+- `.json` (structured records render as Markdown with one heading per
+  field, so chunk review and heading-aware tooling see the record's own
+  structure)
 
 Images:
 

@@ -29,9 +29,21 @@ if str(PACKER_PARENT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from packer import presets  # noqa: E402
+from packer.chunking import (  # noqa: E402
+    DEFAULT_HEADING_LEVEL,
+    STRATEGY_HEADINGS,
+    STRATEGY_TOKENS,
+)
 from packer.exporters import InstructionContext, write_instructions  # noqa: E402
 from packer.markdown_utils import safe_filename  # noqa: E402
-from packer.pipeline import PackResult, ProgressEvent, run_packaging_job  # noqa: E402
+from packer.pipeline import (  # noqa: E402
+    DocumentChunkPreview,
+    PackResult,
+    ProgressEvent,
+    chunking_guidance,
+    preview_document_chunks,
+    run_packaging_job,
+)
 from packer.profiles import (  # noqa: E402
     Profile,
     delete_profile,
@@ -51,9 +63,28 @@ SESSION_KEY_GEN = "form_generation"
 SESSION_KEY_SCAN_CACHE = "scan_cache"
 SESSION_KEY_FILE_SELECTIONS = "file_review_selections"
 SESSION_KEY_FILE_SELECTION_REVISIONS = "file_review_selection_revisions"
+SESSION_KEY_CHUNK_SELECTIONS = "chunk_review_selections"
+SESSION_KEY_CHUNK_PREVIEWS = "chunk_preview_cache"
+SESSION_KEY_CHUNK_REVISIONS = "chunk_review_revisions"
+SESSION_KEY_CORPUS_AUDIT = "corpus_chunk_audit"
 SESSION_KEY_LAST_EXPORT_RESULT = "last_export_result"
 BUNDLE_SEPARATOR_OPTIONS = ("comment", "rule", "blank")
-FILE_TYPE_ORDER = ("text", "html", "pdf", "docx", "csv", "xlsx", "image", "unsupported")
+FILE_TYPE_ORDER = (
+    "text",
+    "html",
+    "pdf",
+    "docx",
+    "csv",
+    "xlsx",
+    "json",
+    "image",
+    "unsupported",
+)
+DEFAULT_CHUNK_REVIEW_TOKENS = 800
+CHUNK_STRATEGY_LABELS = {
+    STRATEGY_TOKENS: "Token budget (pack paragraphs)",
+    STRATEGY_HEADINGS: "Heading sections (split at headings)",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +110,14 @@ def _ensure_session_state() -> None:
         st.session_state[SESSION_KEY_FILE_SELECTIONS] = {}
     if SESSION_KEY_FILE_SELECTION_REVISIONS not in st.session_state:
         st.session_state[SESSION_KEY_FILE_SELECTION_REVISIONS] = {}
+    if SESSION_KEY_CHUNK_SELECTIONS not in st.session_state:
+        st.session_state[SESSION_KEY_CHUNK_SELECTIONS] = {}
+    if SESSION_KEY_CHUNK_PREVIEWS not in st.session_state:
+        st.session_state[SESSION_KEY_CHUNK_PREVIEWS] = {}
+    if SESSION_KEY_CHUNK_REVISIONS not in st.session_state:
+        st.session_state[SESSION_KEY_CHUNK_REVISIONS] = {}
+    if SESSION_KEY_CORPUS_AUDIT not in st.session_state:
+        st.session_state[SESSION_KEY_CORPUS_AUDIT] = {}
     if SESSION_KEY_LAST_EXPORT_RESULT not in st.session_state:
         st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = None
 
@@ -987,8 +1026,510 @@ def _render_file_review(
         if relative_path:
             selections[relative_path] = bool(record.get("include", False))
 
+    _render_chunk_review(key, files, selections)
     _render_packaging_settings(key, files, selections)
     _render_preview_and_export(key, files, selections)
+
+
+def _chunk_store(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> Dict[str, Dict[str, object]]:
+    return st.session_state[SESSION_KEY_CHUNK_SELECTIONS].setdefault(
+        _selection_store_key(key), {}
+    )
+
+
+def _chunk_revision(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    relative_path: str,
+) -> int:
+    revisions = st.session_state[SESSION_KEY_CHUNK_REVISIONS]
+    return int(revisions.get((_selection_store_key(key), relative_path), 0))
+
+
+def _bump_chunk_revision(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    relative_path: str,
+) -> None:
+    revisions = st.session_state[SESSION_KEY_CHUNK_REVISIONS]
+    revision_key = (_selection_store_key(key), relative_path)
+    revisions[revision_key] = int(revisions.get(revision_key, 0)) + 1
+
+
+def _chunk_preview_text(text: str, limit: int = 160) -> str:
+    line = " ".join(text.split())
+    return line[:limit] + ("…" if len(line) > limit else "")
+
+
+def _export_chunk_selections(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> Tuple[Dict[str, List[int]], int | None, str, int]:
+    """Return partial chunk selections for included files plus the chunk
+    settings (budget, strategy, heading level) they were made under.
+
+    When the chunk review widgets have been rendered, their current values
+    are returned even without partial selections so a RAG export's
+    ``chunks.jsonl`` matches what the user previewed."""
+    store = _chunk_store(key)
+    included = set(_included_paths(files, selections))
+    partial: Dict[str, List[int]] = {}
+    widget_prefix = f"chunks_{_scan_key_id(key)}"
+    widget_budget = st.session_state.get(f"{widget_prefix}_budget")
+    budget: int | None = int(widget_budget) if widget_budget is not None else None
+    strategy = str(st.session_state.get(f"{widget_prefix}_strategy", STRATEGY_TOKENS))
+    heading_level = int(
+        st.session_state.get(f"{widget_prefix}_heading_level", DEFAULT_HEADING_LEVEL)
+    )
+    for relative_path, state in store.items():
+        if relative_path not in included:
+            continue
+        selected = list(state.get("selected", []))  # type: ignore[arg-type]
+        if len(selected) == int(state.get("total", 0)):  # type: ignore[arg-type]
+            continue
+        partial[relative_path] = [int(i) for i in selected]
+        budget = int(state.get("budget", DEFAULT_CHUNK_REVIEW_TOKENS))  # type: ignore[arg-type]
+        strategy = str(state.get("strategy", STRATEGY_TOKENS))
+        heading_level = int(state.get("heading_level", DEFAULT_HEADING_LEVEL))  # type: ignore[arg-type]
+    return partial, budget, strategy, heading_level
+
+
+def _render_chunk_review(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> None:
+    st.subheader("Document chunk review")
+    st.caption(
+        "Optional: preview how an included document splits into token-sized "
+        "chunks and deselect the portions you don't need. Documents without a "
+        "chunk selection are exported in full. Previews convert one file at a "
+        "time in a temporary workspace; nothing is written to the output folder."
+    )
+
+    eligible = [
+        scanned
+        for scanned in _selected_files(files, selections)
+        if _is_supported(scanned)
+    ]
+    store = _chunk_store(key)
+    if not eligible:
+        st.info("Include at least one supported file above to review its chunks.")
+        return
+
+    widget_prefix = f"chunks_{_scan_key_id(key)}"
+    col_strategy, col_level, col_budget = st.columns([2, 1, 1])
+    with col_strategy:
+        strategy = st.selectbox(
+            "Chunking strategy",
+            options=list(CHUNK_STRATEGY_LABELS),
+            format_func=lambda value: CHUNK_STRATEGY_LABELS[value],
+            key=f"{widget_prefix}_strategy",
+            help=(
+                "Token budget packs paragraphs greedily up to the chunk size. "
+                "Heading sections never merge content across headings — each "
+                "section becomes its own chunk (split further only if it "
+                "exceeds the chunk size). Use heading sections when documents "
+                "have meaningful structure, e.g. converted records or manuals."
+            ),
+        )
+    with col_level:
+        if strategy == STRATEGY_HEADINGS:
+            heading_level = int(
+                st.selectbox(
+                    "Split at heading level",
+                    options=[1, 2, 3, 4],
+                    index=DEFAULT_HEADING_LEVEL - 1,
+                    key=f"{widget_prefix}_heading_level",
+                    help=(
+                        "Sections start at headings of this level or shallower; "
+                        "deeper headings stay inside their section."
+                    ),
+                )
+            )
+        else:
+            heading_level = DEFAULT_HEADING_LEVEL
+    with col_budget:
+        budget = int(
+            st.number_input(
+                "Chunk size (tokens)",
+                min_value=50,
+                value=DEFAULT_CHUNK_REVIEW_TOKENS,
+                step=50,
+                key=f"{widget_prefix}_budget",
+                help=(
+                    "Smaller chunks give finer selection control. Changing any "
+                    "chunk setting re-chunks documents and clears selections "
+                    "made under different settings."
+                ),
+            )
+        )
+
+    stale_paths = [
+        relative_path
+        for relative_path, state in store.items()
+        if (
+            int(state.get("budget", -1)) != budget  # type: ignore[arg-type]
+            or str(state.get("strategy", STRATEGY_TOKENS)) != strategy
+            or int(state.get("heading_level", DEFAULT_HEADING_LEVEL)) != heading_level  # type: ignore[arg-type]
+        )
+    ]
+    for relative_path in stale_paths:
+        del store[relative_path]
+    if stale_paths:
+        st.info(
+            f"Cleared chunk selections for {len(stale_paths)} document(s) made "
+            "under different chunk settings."
+        )
+
+    _render_corpus_chunk_audit(key, eligible, budget, strategy, heading_level, widget_prefix)
+
+    paths = [str(scanned.relative_path) for scanned in eligible]
+    chosen = st.selectbox("Document", options=paths, key=f"{widget_prefix}_doc")
+    scanned = next(s for s in eligible if str(s.relative_path) == chosen)
+    source_root = _resolved_source_path(_profile())
+
+    cache = st.session_state[SESSION_KEY_CHUNK_PREVIEWS]
+    cache_key = (_selection_store_key(key), chosen, budget, strategy, heading_level)
+    col_preview, col_refresh = st.columns([1, 1])
+    preview_clicked = col_preview.button(
+        "Preview chunks",
+        type="primary",
+        key=f"{widget_prefix}_preview",
+    )
+    if col_refresh.button("Refresh preview", key=f"{widget_prefix}_refresh"):
+        cache.pop(cache_key, None)
+        preview_clicked = True
+    if preview_clicked and cache_key not in cache:
+        with st.spinner(f"Converting and chunking {chosen}..."):
+            cache[cache_key] = preview_document_chunks(
+                scanned, source_root, budget, strategy, heading_level
+            )
+
+    preview = cache.get(cache_key)
+    if isinstance(preview, DocumentChunkPreview):
+        _render_chunk_editor(
+            key, chosen, budget, strategy, heading_level, preview, store, widget_prefix
+        )
+    else:
+        st.info("Click Preview chunks to convert this document and list its chunks.")
+
+    _render_chunk_summary(key, store, widget_prefix)
+
+
+def _corpus_audit_key(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    budget: int,
+    strategy: str,
+    heading_level: int,
+    eligible: Sequence[ScannedFile],
+) -> Tuple[str, int, str, int, str]:
+    paths = tuple(sorted(str(scanned.relative_path) for scanned in eligible))
+    return (
+        _selection_store_key(key),
+        budget,
+        strategy,
+        heading_level,
+        sha1(repr(paths).encode("utf-8")).hexdigest()[:12],
+    )
+
+
+def _render_corpus_chunk_audit(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    eligible: Sequence[ScannedFile],
+    budget: int,
+    strategy: str,
+    heading_level: int,
+    widget_prefix: str,
+) -> None:
+    with st.expander("Corpus chunking audit", expanded=False):
+        st.caption(
+            "Converts every included document and chunks it with the current "
+            "settings, so you can see how the chunker behaves across the "
+            "whole corpus — where boundaries land and why — and get guidance "
+            "before reviewing individual documents."
+        )
+        audit_store = st.session_state[SESSION_KEY_CORPUS_AUDIT]
+        audit_key = _corpus_audit_key(key, budget, strategy, heading_level, eligible)
+        if st.button(
+            f"Analyze corpus chunking ({len(eligible)} document(s))",
+            key=f"{widget_prefix}_corpus",
+        ):
+            source_root = _resolved_source_path(_profile())
+            cache = st.session_state[SESSION_KEY_CHUNK_PREVIEWS]
+            progress = st.progress(0)
+            previews: Dict[str, DocumentChunkPreview] = {}
+            for position, scanned in enumerate(eligible, start=1):
+                relative_path = str(scanned.relative_path)
+                cache_key = (
+                    _selection_store_key(key),
+                    relative_path,
+                    budget,
+                    strategy,
+                    heading_level,
+                )
+                if cache_key not in cache:
+                    cache[cache_key] = preview_document_chunks(
+                        scanned, source_root, budget, strategy, heading_level
+                    )
+                previews[relative_path] = cache[cache_key]
+                progress.progress(int(position / len(eligible) * 100))
+            audit_store[audit_key] = previews
+            progress.empty()
+
+        previews = audit_store.get(audit_key)
+        if previews is None:
+            st.caption(
+                "Not analyzed yet for the current scan, selection, and chunk settings."
+            )
+            return
+        _render_corpus_audit_results(previews, budget)
+
+        tips = chunking_guidance(previews, budget, strategy, _profile().target)
+        st.markdown("**Chunking guidance**")
+        if tips:
+            for tip in tips:
+                st.info(tip)
+        else:
+            st.caption(
+                "Nothing stood out: chunk sizes are within budget and match "
+                "the current strategy well."
+            )
+
+
+def _render_corpus_audit_results(
+    previews: Dict[str, DocumentChunkPreview],
+    budget: int,
+) -> None:
+    converted = {
+        path: preview for path, preview in previews.items() if preview.status == "ok"
+    }
+    failed = {
+        path: preview for path, preview in previews.items() if preview.status != "ok"
+    }
+    all_chunks = [chunk for preview in converted.values() for chunk in preview.chunks]
+    over_budget = sum(1 for chunk in all_chunks if chunk.token_estimate > budget)
+
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("Documents analyzed", len(previews))
+    metric_cols[1].metric("Total chunks", len(all_chunks))
+    metric_cols[2].metric(
+        "Total tokens",
+        f"{sum(chunk.token_estimate for chunk in all_chunks):,}",
+    )
+    metric_cols[3].metric("Chunks over budget", over_budget)
+
+    if all_chunks:
+        sizes = sorted(chunk.token_estimate for chunk in all_chunks)
+        st.write(
+            f"Chunk sizes (tokens): smallest {sizes[0]:,}, "
+            f"median {sizes[len(sizes) // 2]:,}, largest {sizes[-1]:,} "
+            f"against a budget of {budget:,}."
+        )
+
+        reason_counts = Counter(chunk.boundary_reason for chunk in all_chunks)
+        st.markdown("**Why chunk boundaries were drawn**")
+        st.dataframe(
+            [
+                {"boundary_reason": reason, "chunks": count}
+                for reason, count in reason_counts.most_common()
+            ],
+            hide_index=True,
+            **_dataframe_layout_kwargs(),
+        )
+
+    st.markdown("**Per-document chunking**")
+    st.dataframe(
+        [
+            {
+                "relative_path": path,
+                "chunks": len(preview.chunks),
+                "tokens": preview.total_tokens,
+                "largest_chunk": max(
+                    (chunk.token_estimate for chunk in preview.chunks), default=0
+                ),
+                "over_budget_chunks": sum(
+                    1 for chunk in preview.chunks if chunk.token_estimate > budget
+                ),
+                "headings": sum(
+                    len(chunk.structure.headings)
+                    for chunk in preview.chunks
+                    if chunk.structure
+                ),
+                "single_chunk": len(preview.chunks) == 1,
+            }
+            for path, preview in sorted(converted.items())
+        ],
+        hide_index=True,
+        **_dataframe_layout_kwargs(),
+    )
+    if over_budget:
+        st.warning(
+            f"{over_budget} chunk(s) exceed the budget. These come from single "
+            "lines (often tables or long list rows) that cannot be split at a "
+            "paragraph or line boundary."
+        )
+    for path, preview in sorted(failed.items()):
+        st.warning(f"Could not convert {path} (status: {preview.status}). {preview.notes}")
+
+
+def _render_chunk_editor(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    relative_path: str,
+    budget: int,
+    strategy: str,
+    heading_level: int,
+    preview: DocumentChunkPreview,
+    store: Dict[str, Dict[str, object]],
+    widget_prefix: str,
+) -> None:
+    if preview.status != "ok":
+        st.warning(
+            f"Could not convert {relative_path} (status: {preview.status}). "
+            f"{preview.notes}"
+        )
+        return
+    if not preview.chunks:
+        st.caption("This document converted to empty content; nothing to select.")
+        return
+
+    state = store.get(relative_path)
+    if state is None or int(state.get("total", -1)) != len(preview.chunks):  # type: ignore[arg-type]
+        state = {
+            "budget": budget,
+            "strategy": strategy,
+            "heading_level": heading_level,
+            "selected": list(range(1, len(preview.chunks) + 1)),
+            "total": len(preview.chunks),
+        }
+        store[relative_path] = state
+    selected_set = {int(i) for i in state["selected"]}  # type: ignore[union-attr]
+
+    col_all, col_none = st.columns(2)
+    if col_all.button("Include all chunks", key=f"{widget_prefix}_include_all_chunks"):
+        state["selected"] = list(range(1, len(preview.chunks) + 1))
+        _bump_chunk_revision(key, relative_path)
+        st.rerun()
+    if col_none.button("Exclude all chunks", key=f"{widget_prefix}_exclude_all_chunks"):
+        state["selected"] = []
+        _bump_chunk_revision(key, relative_path)
+        st.rerun()
+
+    if strategy == STRATEGY_HEADINGS:
+        st.caption(
+            f"How chunks are made: a new chunk starts at every heading of "
+            f"level {heading_level} or shallower (deeper headings stay inside "
+            "their section); a section bigger than the token budget is split "
+            "by paragraphs, then lines. Each row shows the structure a chunk "
+            "contains and why its boundary was drawn — use this to judge "
+            "whether the settings suit the corpus."
+        )
+    else:
+        st.caption(
+            "How chunks are made: paragraphs are appended in order until the "
+            "next paragraph would push the chunk over the token budget; a "
+            "paragraph bigger than the budget on its own is split at line "
+            "boundaries. Each row shows the structure a chunk contains and "
+            "why its boundary was drawn — use this to judge whether the "
+            "settings suit the corpus."
+        )
+    rows = [
+        {
+            "include": chunk.index in selected_set,
+            "chunk": chunk.index,
+            "tokens": chunk.token_estimate,
+            "heading": chunk.first_heading,
+            "structure": chunk.structure.describe() if chunk.structure else "",
+            "boundary": chunk.boundary_reason,
+            "preview": _chunk_preview_text(chunk.text),
+        }
+        for chunk in preview.chunks
+    ]
+    editor_key = (
+        f"{widget_prefix}_editor_{sha1(relative_path.encode('utf-8')).hexdigest()[:8]}"
+        f"_{budget}_{strategy}_{heading_level}_{_chunk_revision(key, relative_path)}"
+    )
+    edited_rows = st.data_editor(
+        rows,
+        hide_index=True,
+        key=editor_key,
+        **_dataframe_layout_kwargs(),
+        column_config={
+            "include": st.column_config.CheckboxColumn("include"),
+            "chunk": st.column_config.NumberColumn("chunk", format="%d"),
+            "tokens": st.column_config.NumberColumn("tokens", format="%d"),
+            "heading": st.column_config.TextColumn("heading"),
+            "structure": st.column_config.TextColumn("structure"),
+            "boundary": st.column_config.TextColumn("boundary"),
+            "preview": st.column_config.TextColumn("preview"),
+        },
+        disabled=["chunk", "tokens", "heading", "structure", "boundary", "preview"],
+    )
+    state["selected"] = sorted(
+        int(record["chunk"])
+        for record in _editor_records(edited_rows)
+        if record.get("include")
+    )
+
+    selected_now = {int(i) for i in state["selected"]}  # type: ignore[union-attr]
+    kept_tokens = sum(
+        chunk.token_estimate for chunk in preview.chunks if chunk.index in selected_now
+    )
+    metric_cols = st.columns(3)
+    metric_cols[0].metric("Chunks", len(preview.chunks))
+    metric_cols[1].metric("Selected chunks", len(selected_now))
+    metric_cols[2].metric(
+        "Selected tokens",
+        f"{kept_tokens:,} / {preview.total_tokens:,}",
+    )
+    if not selected_now:
+        st.warning(
+            "All chunks are deselected. This document will be recorded as "
+            "skipped and its content omitted from the export."
+        )
+
+    with st.expander("View chunk text", expanded=False):
+        for chunk in preview.chunks:
+            marker = "included" if chunk.index in selected_now else "excluded"
+            details = chunk.structure.describe() if chunk.structure else ""
+            st.markdown(
+                f"**Chunk {chunk.index}** — {chunk.token_estimate:,} tokens, "
+                f"{marker} · {details} · boundary: {chunk.boundary_reason}"
+            )
+            st.code(chunk.text[:5000], language="markdown")
+
+
+def _render_chunk_summary(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    store: Dict[str, Dict[str, object]],
+    widget_prefix: str,
+) -> None:
+    partial = {
+        relative_path: state
+        for relative_path, state in store.items()
+        if len(state.get("selected", [])) != int(state.get("total", 0))  # type: ignore[arg-type]
+    }
+    if not partial:
+        st.caption("No chunk selections yet; every document exports in full.")
+        return
+
+    st.markdown("**Documents with chunk selections**")
+    st.dataframe(
+        [
+            {
+                "relative_path": relative_path,
+                "selected_chunks": len(state.get("selected", [])),  # type: ignore[arg-type]
+                "total_chunks": int(state.get("total", 0)),  # type: ignore[arg-type]
+            }
+            for relative_path, state in sorted(partial.items())
+        ],
+        hide_index=True,
+        **_dataframe_layout_kwargs(),
+    )
+    if st.button("Clear all chunk selections", key=f"{widget_prefix}_clear_chunks"):
+        store.clear()
+        st.rerun()
 
 
 def _render_packaging_settings(
@@ -1065,7 +1606,21 @@ def _render_preview_and_export(
         profile.target,
         max_bundle_tokens,
     )
+    chunk_selections, chunk_token_budget, chunk_strategy, chunk_heading_level = (
+        _export_chunk_selections(key, files, selections)
+    )
     warnings = _preview_warnings(profile, files, selected_files)
+    if chunk_selections:
+        warnings.append(
+            f"{len(chunk_selections)} document(s) have partial chunk selections; "
+            "their content will be trimmed at export."
+        )
+    if profile.target == "rag" and chunk_token_budget is not None:
+        warnings.append(
+            "RAG chunks.jsonl will use the chunk review settings: "
+            f"{chunk_token_budget:,} tokens per chunk, "
+            f"{CHUNK_STRATEGY_LABELS.get(chunk_strategy, chunk_strategy)} strategy."
+        )
     instruction_preview, instruction_warnings = _instruction_preview(
         profile,
         selected_files,
@@ -1113,7 +1668,15 @@ def _render_preview_and_export(
         disabled=included_count == 0,
         key=f"export_{_scan_key_id(key)}",
     ):
-        _run_export(profile, included_paths, included_count)
+        _run_export(
+            profile,
+            included_paths,
+            included_count,
+            chunk_selections=chunk_selections,
+            chunk_token_budget=chunk_token_budget,
+            chunk_strategy=chunk_strategy,
+            chunk_heading_level=chunk_heading_level,
+        )
 
     last_result = st.session_state.get(SESSION_KEY_LAST_EXPORT_RESULT)
     if isinstance(last_result, PackResult):
@@ -1124,6 +1687,11 @@ def _run_export(
     profile: Profile,
     included_paths: Sequence[str],
     included_count: int,
+    *,
+    chunk_selections: Dict[str, List[int]] | None = None,
+    chunk_token_budget: int | None = None,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
 ) -> None:
     source_dir = _resolved_source_path(profile)
     output_dir = _resolved_output_path(profile)
@@ -1164,6 +1732,10 @@ def _run_export(
             include_extensions=_resolved_include_extensions(profile),
             exclude_dirs=_resolved_exclude_dirs(profile),
             included_files=included_paths,
+            chunk_selections=chunk_selections or None,
+            chunk_token_budget=chunk_token_budget,
+            chunk_strategy=chunk_strategy,
+            chunk_heading_level=chunk_heading_level,
             progress_callback=on_progress,
         )
     except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI

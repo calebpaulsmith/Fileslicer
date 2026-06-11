@@ -55,6 +55,7 @@ DEFAULT_INCLUDE_EXTENSIONS = (
     ".docx",
     ".csv",
     ".xlsx",
+    ".json",
     ".png",
     ".jpg",
     ".jpeg",
@@ -85,6 +86,7 @@ PDF_EXTS = {".pdf"}
 DOCX_EXTS = {".docx"}
 CSV_EXTS = {".csv"}
 XLSX_EXTS = {".xlsx"}
+JSON_EXTS = {".json"}
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
 
 
@@ -103,6 +105,8 @@ def classify_extension(ext: str) -> str:
         return "csv"
     if ext in XLSX_EXTS:
         return "xlsx"
+    if ext in JSON_EXTS:
+        return "json"
     if ext in IMAGE_EXTS:
         return "image"
     return "unsupported"
