@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import presets
 from .bundler import (
@@ -14,6 +15,7 @@ from .bundler import (
     split_into_bundles,
     write_bundle,
 )
+from .chunking import Chunk, chunk_document
 from .config import PackerConfig
 from .exporters import (
     InstructionContext,
@@ -67,6 +69,8 @@ def run_packaging_job(
     include_extensions: Optional[Iterable[str]] = None,
     exclude_dirs: Optional[Iterable[str]] = None,
     included_files: Optional[Iterable[Path | str]] = None,
+    chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
+    chunk_token_budget: Optional[int] = None,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -75,6 +79,13 @@ def run_packaging_job(
     This is the public backend entry point intended for both the current CLI
     and future UI adapters. The UI should pass user selections here instead of
     duplicating scan, convert, bundle, manifest, or export logic.
+
+    ``chunk_selections`` maps source-relative paths to the 1-based chunk
+    indices to keep, where chunks are computed by
+    ``chunking.chunk_document(body, chunk_token_budget)``. Documents without
+    an entry keep their full content; an explicit empty selection records the
+    document as skipped. ``chunk_token_budget`` defaults to the resolved
+    bundle token budget and must match the budget used to preview chunks.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -99,6 +110,8 @@ def run_packaging_job(
     return run_packaging_config(
         cfg,
         included_files=included_file_list,
+        chunk_selections=chunk_selections,
+        chunk_token_budget=chunk_token_budget,
         progress_callback=progress_callback,
     )
 
@@ -107,6 +120,8 @@ def run_packaging_config(
     cfg: PackerConfig,
     *,
     included_files: Optional[Iterable[Path | str]] = None,
+    chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
+    chunk_token_budget: Optional[int] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -178,6 +193,15 @@ def run_packaging_config(
         data_dir=data_dir,
     )
     converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
+    if chunk_selections:
+        converted_docs = _apply_chunk_selections(
+            converted_docs,
+            chunk_selections=chunk_selections,
+            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            source_dir=cfg.source_dir,
+            warnings=warnings,
+            emit=emit,
+        )
 
     bundle_paths: List[Path] = []
     bundle_filenames: List[str] = []
@@ -305,6 +329,122 @@ def _convert_files(
 
         manifest.add(entry)
     return converted_docs
+
+
+def _apply_chunk_selections(
+    converted_docs: List[ConvertedDoc],
+    *,
+    chunk_selections: Mapping[str, Sequence[int]],
+    max_chunk_tokens: int,
+    source_dir: Path,
+    warnings: List[str],
+    emit: Callable[..., None],
+) -> List[ConvertedDoc]:
+    normalized = {
+        _included_key(path, source_dir): tuple(int(i) for i in indices)
+        for path, indices in chunk_selections.items()
+    }
+    matched: set[str] = set()
+    kept_docs: List[ConvertedDoc] = []
+    for doc in converted_docs:
+        key = doc.entry.source_path.lower()
+        if key not in normalized:
+            kept_docs.append(doc)
+            continue
+        matched.add(key)
+        requested = normalized[key]
+        chunks = chunk_document(doc.body_markdown, max_chunk_tokens)
+        if not requested:
+            doc.entry.status = "skipped"
+            doc.entry.token_estimate = 0
+            doc.entry.notes = _append_note(
+                doc.entry.notes,
+                "All chunks were deselected during chunk review; content omitted.",
+            )
+            warning = (
+                f"{doc.entry.doc_id} {doc.entry.source_path}: all chunks deselected; "
+                "document omitted from export."
+            )
+            warnings.append(warning)
+            emit("chunk_doc_omitted", f"  {warning}", {"doc_id": doc.entry.doc_id})
+            continue
+        valid = sorted({i for i in requested if 1 <= i <= len(chunks)})
+        invalid = sorted(set(requested) - set(valid))
+        if invalid:
+            warning = (
+                f"{doc.entry.doc_id} {doc.entry.source_path}: chunk indices out of "
+                f"range were ignored: {invalid} (document has {len(chunks)} chunks)"
+            )
+            warnings.append(warning)
+            emit("warning", f"  Warning: {warning}")
+        if not valid or len(valid) == len(chunks):
+            kept_docs.append(doc)
+            continue
+        trimmed_body = "\n\n".join(chunks[i - 1].text for i in valid)
+        trimmed_doc = make_converted_doc(doc.entry, trimmed_body)
+        trimmed_doc.entry.token_estimate = trimmed_doc.token_estimate
+        trimmed_doc.entry.notes = _append_note(
+            trimmed_doc.entry.notes,
+            f"Partial content: kept {len(valid)} of {len(chunks)} chunks via chunk review.",
+        )
+        emit(
+            "chunk_selection_applied",
+            f"  {doc.entry.doc_id}: kept {len(valid)} of {len(chunks)} chunks.",
+            {"doc_id": doc.entry.doc_id, "kept": len(valid), "total": len(chunks)},
+        )
+        kept_docs.append(trimmed_doc)
+
+    for key in sorted(set(normalized) - matched):
+        warning = f"Chunk selection ignored for unprocessed or excluded file: {key}"
+        warnings.append(warning)
+        emit("warning", f"  Warning: {warning}")
+    return kept_docs
+
+
+def _append_note(existing: str, note: str) -> str:
+    return f"{existing}; {note}" if existing else note
+
+
+@dataclass
+class DocumentChunkPreview:
+    """Chunks for one source file, converted in a throwaway workspace."""
+
+    status: str
+    notes: str
+    chunks: List[Chunk]
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(chunk.token_estimate for chunk in self.chunks)
+
+
+def preview_document_chunks(
+    scanned: ScannedFile,
+    source_root: Path,
+    max_chunk_tokens: int,
+) -> DocumentChunkPreview:
+    """Convert one file in a temporary workspace and return its chunk preview.
+
+    Intended for UI adapters that let the user review and select chunks before
+    export. Asset/data copies made during conversion land in a temp directory
+    and are discarded. The placeholder doc id matches the length of real
+    ``DOC_xxxx`` ids so asset links don't shift chunk boundaries at export.
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        tmp_path = Path(tmp)
+        ctx = ReaderContext(
+            source_root=Path(source_root).expanduser().resolve(),
+            assets_dir=tmp_path / "assets",
+            data_dir=tmp_path / "data",
+        )
+        result = read_file(scanned, doc_id="DOC_0000", ctx=ctx)
+    if result.status != "ok":
+        return DocumentChunkPreview(status=result.status, notes=result.notes, chunks=[])
+    return DocumentChunkPreview(
+        status="ok",
+        notes=result.notes,
+        chunks=chunk_document(result.markdown, max_chunk_tokens),
+    )
 
 
 def _normalize_extensions(values: Optional[Iterable[str]]) -> Tuple[str, ...]:

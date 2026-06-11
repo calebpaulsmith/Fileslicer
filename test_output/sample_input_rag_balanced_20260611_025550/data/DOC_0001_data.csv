@@ -1,0 +1,4 @@
+part,price,in_stock
+fluid,12.99,true
+filter,8.50,true
+gasket,3.25,false

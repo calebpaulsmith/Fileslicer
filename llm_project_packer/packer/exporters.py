@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List
 
 from .bundler import Bundle, ConvertedDoc
+from .chunking import chunk_markdown
 from .manifest import Manifest
 from .token_estimator import estimate_tokens, estimator_backend
 
@@ -287,7 +288,7 @@ def write_rag_export(
                 }
                 continue
 
-            chunk_texts = _chunk_text(text, max_chunk_tokens)
+            chunk_texts = chunk_markdown(text, max_chunk_tokens)
             chunk_ids: List[str] = []
             for i, chunk_text in enumerate(chunk_texts, start=1):
                 chunk_id = f"{doc.entry.doc_id}__c{i:03d}"
@@ -313,71 +314,6 @@ def write_rag_export(
         json.dumps(source_map, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-
-
-def _chunk_text(text: str, max_tokens: int) -> List[str]:
-    """Split text into chunks at paragraph boundaries within a token budget.
-
-    Paragraphs are joined into a chunk while the running token estimate stays
-    under ``max_tokens``. Paragraphs that exceed the budget on their own are
-    further split by lines so we never emit silently-truncated content.
-    """
-    if max_tokens <= 0:
-        return [text]
-
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return [text]
-
-    chunks: List[str] = []
-    buffer: List[str] = []
-    buffer_tokens = 0
-
-    for para in paragraphs:
-        para_tokens = estimate_tokens(para)
-        if para_tokens > max_tokens:
-            # Flush current buffer first.
-            if buffer:
-                chunks.append("\n\n".join(buffer))
-                buffer = []
-                buffer_tokens = 0
-            # Split the oversize paragraph by lines.
-            chunks.extend(_split_oversize_paragraph(para, max_tokens))
-            continue
-
-        if buffer_tokens + para_tokens <= max_tokens:
-            buffer.append(para)
-            buffer_tokens += para_tokens
-        else:
-            chunks.append("\n\n".join(buffer))
-            buffer = [para]
-            buffer_tokens = para_tokens
-
-    if buffer:
-        chunks.append("\n\n".join(buffer))
-
-    return chunks
-
-
-def _split_oversize_paragraph(para: str, max_tokens: int) -> List[str]:
-    """Last-ditch line-level split for paragraphs that exceed the chunk budget."""
-    lines = para.split("\n")
-    chunks: List[str] = []
-    buffer: List[str] = []
-    buffer_tokens = 0
-    for line in lines:
-        line_tokens = estimate_tokens(line)
-        if buffer_tokens + line_tokens <= max_tokens:
-            buffer.append(line)
-            buffer_tokens += line_tokens
-        else:
-            if buffer:
-                chunks.append("\n".join(buffer))
-            buffer = [line]
-            buffer_tokens = line_tokens
-    if buffer:
-        chunks.append("\n".join(buffer))
-    return chunks
 
 
 # ---------------------------------------------------------------------------

@@ -15,8 +15,8 @@ Status:
   chunks.
 - **Version 2 UI:** in progress but usable for local preview/export. The
   Streamlit app can load/save profiles, scan/audit sources, review included
-  files, preview the planned export, and create bundles through the shared
-  backend.
+  files, review per-document chunks and deselect unwanted portions, preview
+  the planned export, and create bundles through the shared backend.
 
 Everything is local. The tool does not upload files, automate logins, drive a
 browser, run OCR, create embeddings, or host a server.
@@ -63,13 +63,17 @@ UI flow:
 2. Set project name, source folder, output folder, target, and mode.
 3. Click `Scan Source Folder`.
 4. Review files and include/exclude what should be packed.
-5. Adjust packaging settings, including the optional max-token override and
+5. Optionally open `Document chunk review`, preview how an included document
+   splits into token-sized chunks, and deselect the portions you don't want
+   exported. Documents without a chunk selection export in full; trimmed
+   documents are noted in the manifest.
+6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
-6. Check the preview: included/skipped counts, target/mode, bundle budget,
+7. Check the preview: included/skipped counts, target/mode, bundle budget,
    rough bundle count, output folder pattern, warnings, and instruction
    preview.
-7. Click `Create LLM Project Bundles`.
-8. Use the generated folder path and manual upload instructions shown after
+8. Click `Create LLM Project Bundles`.
+9. Use the generated folder path and manual upload instructions shown after
    export.
 
 Profiles are saved to `~/.llm_project_packer/profiles/`, the same location

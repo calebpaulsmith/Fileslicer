@@ -102,6 +102,28 @@ Already shipped:
   target/mode, default token budget, resolved budget, max-token override,
   rough selected-token estimate, and projected bundle count. Override values
   are stored on the active `Profile` and passed to the export call.
+- Document chunk review in `streamlit_app.py`, backed by `packer/chunking.py`:
+  chunking was split out of `exporters.py` into `packer.chunking`
+  (`Chunk`, `chunk_markdown`, `chunk_document`); the RAG export now calls
+  `chunking.chunk_markdown` with identical output. The UI section sits
+  between file review and packaging settings: the user picks a chunk size
+  in tokens (default 800), previews how one included document splits into
+  chunks via `pipeline.preview_document_chunks(...)` (conversion happens in
+  a temporary workspace using a fixed-width `DOC_0000` placeholder id so
+  asset links don't shift chunk boundaries), and toggles per-chunk include
+  flags. Selections live in `st.session_state["chunk_review_selections"]`
+  as `{repr(scan_key): {relative_path: {"budget", "selected", "total"}}}`;
+  changing the chunk size clears selections made at a different size.
+  Export passes partial selections to
+  `run_packaging_job(chunk_selections=..., chunk_token_budget=...)`. The
+  pipeline re-chunks each selected document with the same deterministic
+  chunker, keeps only the selected 1-based chunk indices, rebuilds the
+  `ConvertedDoc`, and appends a "Partial content: kept m of n chunks" note
+  to the manifest entry. An explicit empty selection records the document
+  as `status=skipped` with a clear note; out-of-range indices and
+  selections for unprocessed files produce warnings without failing the
+  run. Documents without a chunk selection export in full. The CLI is
+  unchanged.
 - Project profile storage in `packer/profiles.py`:
   - `Profile` dataclass (16 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
@@ -128,9 +150,9 @@ Already shipped:
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (2 cases) and `test_profiles.py` (26 cases) —
-  28 in total; passes with `python -m unittest discover -s tests` or
-  `pytest`.
+  `test_pipeline.py` (6 cases), `test_chunking.py` (8 cases), and
+  `test_profiles.py` (26 cases) — 40 in total; passes with
+  `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 
@@ -142,8 +164,6 @@ Backend cleanup that still belongs in V2:
 
 - Fix `bundler.Bundle.filename` so numeric prefixes remain correct past 9
   bundles.
-- Split chunking out of `exporters.py` only if the UI needs chunk-preview or
-  strategy controls.
 - Replace any remaining direct pipeline printing with `ProgressEvent`
   callbacks while preserving CLI output.
 - Keep tests and CLI smoke commands passing after every milestone.
@@ -210,8 +230,8 @@ early.
 - Default to no comments. Only comment when WHY is non-obvious.
 - One responsibility per module. Keep `packer/` modules narrow:
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
-  `token_estimator`, `manifest`, `bundler`, `exporters`, `pipeline`,
-  `profiles`.
+  `token_estimator`, `manifest`, `bundler`, `chunking`, `exporters`,
+  `pipeline`, `profiles`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
@@ -299,6 +319,21 @@ Manual Streamlit inputs and expected outputs:
   Expected: the still-present excluded path remains excluded, the new
   supported file defaults included, unsupported files default excluded, and
   removed paths disappear from the selection state.
+- In `Document chunk review`, set `Chunk size (tokens)` to `50`, pick a
+  multi-paragraph document, click `Preview chunks`.
+  Expected: the chunk table lists every chunk with token estimates and all
+  chunks default included; `Selected tokens` equals the document total.
+- Uncheck one chunk, then export.
+  Expected: the preview warns that one document has a partial chunk
+  selection, the bundle omits the deselected chunk's text, and the manifest
+  entry notes `Partial content: kept m of n chunks`.
+- Click `Exclude all chunks`, then export.
+  Expected: a warning that the document will be skipped; the manifest
+  records `status = skipped` with an "all chunks deselected" note and the
+  bundle omits the document entirely.
+- Change `Chunk size (tokens)` after making a selection.
+  Expected: selections made at the old size are cleared and an info message
+  reports how many were reset.
 
 After a run, inspect the newest folder under `.\test_output\`:
 
