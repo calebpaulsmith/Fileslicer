@@ -10,13 +10,18 @@ sys.path.insert(0, str(PROJECT_DIR))
 from packer.chunking import (  # noqa: E402
     REASON_BUDGET_REACHED,
     REASON_END_OF_DOCUMENT,
+    REASON_HEADING_SECTION,
     REASON_OVERSIZE_SPLIT,
+    REASON_PREAMBLE,
     REASON_WHOLE_DOCUMENT,
+    STRATEGY_HEADINGS,
     Chunk,
     analyze_markdown_structure,
     chunk_document,
     chunk_markdown,
+    chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
+    split_into_heading_sections,
 )
 
 
@@ -111,6 +116,66 @@ class BoundaryReasonTests(unittest.TestCase):
         self.assertEqual(chunks[0].boundary_reason, REASON_WHOLE_DOCUMENT)
         self.assertIsNotNone(chunks[0].structure)
         self.assertEqual(chunks[0].first_heading, "Title")
+
+
+class HeadingChunkingTests(unittest.TestCase):
+    DOC = (
+        "Intro before any heading.\n\n"
+        "# Manual\n\nOverview paragraph.\n\n"
+        "## Setup\n\nSetup paragraph.\n\n### Tools\n\nTools paragraph.\n\n"
+        "## Procedure\n\nProcedure paragraph.\n"
+    )
+
+    def test_sections_split_at_qualifying_headings(self) -> None:
+        sections = split_into_heading_sections(self.DOC, 2)
+        self.assertEqual(len(sections), 4)
+        self.assertTrue(sections[0].startswith("Intro"))
+        self.assertTrue(sections[1].startswith("# Manual"))
+        self.assertTrue(sections[2].startswith("## Setup"))
+        self.assertIn("### Tools", sections[2])
+        self.assertTrue(sections[3].startswith("## Procedure"))
+
+    def test_deeper_split_level_separates_subsections(self) -> None:
+        sections = split_into_heading_sections(self.DOC, 3)
+        self.assertEqual(len(sections), 5)
+        self.assertTrue(any(s.startswith("### Tools") for s in sections))
+
+    def test_each_section_becomes_a_chunk_with_reasons(self) -> None:
+        pairs = chunk_markdown_by_headings_with_reasons(self.DOC, 1000, 2)
+        self.assertEqual(len(pairs), 4)
+        self.assertEqual(pairs[0][1], REASON_PREAMBLE)
+        for _, reason in pairs[1:]:
+            self.assertEqual(reason, REASON_HEADING_SECTION)
+
+    def test_oversize_section_is_subdivided_by_token_chunker(self) -> None:
+        big_section = "## Big\n\n" + "\n\n".join(
+            " ".join(["word"] * 30) for _ in range(3)
+        )
+        pairs = chunk_markdown_by_headings_with_reasons(big_section, 10, 2)
+        self.assertGreater(len(pairs), 1)
+        self.assertEqual(
+            [text for text, _ in pairs],
+            chunk_markdown(big_section, 10),
+        )
+
+    def test_document_without_headings_falls_back_to_token_chunking(self) -> None:
+        text = "\n\n".join(" ".join(["plain"] * 30) for _ in range(3))
+        self.assertEqual(
+            chunk_markdown_by_headings_with_reasons(text, 10, 2),
+            chunk_markdown_with_reasons(text, 10),
+        )
+
+    def test_chunk_document_headings_strategy(self) -> None:
+        chunks = chunk_document(self.DOC, 1000, strategy=STRATEGY_HEADINGS)
+        self.assertEqual(len(chunks), 4)
+        self.assertEqual(chunks[1].first_heading, "Manual")
+        self.assertEqual(chunks[2].first_heading, "Setup")
+        self.assertEqual(chunks[1].boundary_reason, REASON_HEADING_SECTION)
+
+    def test_code_fence_headings_do_not_split(self) -> None:
+        text = "## Real\n\nBody.\n\n```\n## fake heading\n```\n\nMore body.\n"
+        sections = split_into_heading_sections(text, 2)
+        self.assertEqual(len(sections), 1)
 
 
 class StructureAnalysisTests(unittest.TestCase):

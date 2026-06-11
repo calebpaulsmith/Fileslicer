@@ -15,7 +15,12 @@ from .bundler import (
     split_into_bundles,
     write_bundle,
 )
-from .chunking import Chunk, chunk_document
+from .chunking import (
+    DEFAULT_HEADING_LEVEL,
+    STRATEGY_TOKENS,
+    Chunk,
+    chunk_document,
+)
 from .config import PackerConfig
 from .exporters import (
     InstructionContext,
@@ -71,6 +76,8 @@ def run_packaging_job(
     included_files: Optional[Iterable[Path | str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -85,7 +92,11 @@ def run_packaging_job(
     ``chunking.chunk_document(body, chunk_token_budget)``. Documents without
     an entry keep their full content; an explicit empty selection records the
     document as skipped. ``chunk_token_budget`` defaults to the resolved
-    bundle token budget and must match the budget used to preview chunks.
+    bundle token budget and, with ``chunk_strategy`` and
+    ``chunk_heading_level``, must match the settings used to preview chunks.
+    For the ``rag`` target a provided ``chunk_token_budget`` and strategy
+    also shape ``rag_ready/chunks.jsonl``; without them the V1 token-based
+    behavior is unchanged.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -112,6 +123,8 @@ def run_packaging_job(
         included_files=included_file_list,
         chunk_selections=chunk_selections,
         chunk_token_budget=chunk_token_budget,
+        chunk_strategy=chunk_strategy,
+        chunk_heading_level=chunk_heading_level,
         progress_callback=progress_callback,
     )
 
@@ -122,6 +135,8 @@ def run_packaging_config(
     included_files: Optional[Iterable[Path | str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -198,6 +213,8 @@ def run_packaging_config(
             converted_docs,
             chunk_selections=chunk_selections,
             max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            chunk_strategy=chunk_strategy,
+            chunk_heading_level=chunk_heading_level,
             source_dir=cfg.source_dir,
             warnings=warnings,
             emit=emit,
@@ -235,7 +252,9 @@ def run_packaging_config(
         write_rag_export(
             rag_dir,
             converted_docs=converted_docs,
-            max_chunk_tokens=cfg.max_bundle_tokens,
+            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            chunk_strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
 
@@ -336,6 +355,8 @@ def _apply_chunk_selections(
     *,
     chunk_selections: Mapping[str, Sequence[int]],
     max_chunk_tokens: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     source_dir: Path,
     warnings: List[str],
     emit: Callable[..., None],
@@ -353,7 +374,12 @@ def _apply_chunk_selections(
             continue
         matched.add(key)
         requested = normalized[key]
-        chunks = chunk_document(doc.body_markdown, max_chunk_tokens)
+        chunks = chunk_document(
+            doc.body_markdown,
+            max_chunk_tokens,
+            strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
+        )
         if not requested:
             doc.entry.status = "skipped"
             doc.entry.token_estimate = 0
@@ -422,6 +448,8 @@ def preview_document_chunks(
     scanned: ScannedFile,
     source_root: Path,
     max_chunk_tokens: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
 ) -> DocumentChunkPreview:
     """Convert one file in a temporary workspace and return its chunk preview.
 
@@ -443,8 +471,79 @@ def preview_document_chunks(
     return DocumentChunkPreview(
         status="ok",
         notes=result.notes,
-        chunks=chunk_document(result.markdown, max_chunk_tokens),
+        chunks=chunk_document(
+            result.markdown,
+            max_chunk_tokens,
+            strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
+        ),
     )
+
+
+def chunking_guidance(
+    previews: Mapping[str, DocumentChunkPreview],
+    max_chunk_tokens: int,
+    chunk_strategy: str,
+    target: str,
+) -> List[str]:
+    """Return plain-language tips for improving the current chunking setup.
+
+    Rules-based interpretation of a corpus chunking audit; the UI shows the
+    returned strings verbatim. An empty list means nothing stood out.
+    """
+    converted = [p for p in previews.values() if p.status == "ok"]
+    chunks = [chunk for preview in converted for chunk in preview.chunks]
+    tips: List[str] = []
+    if not chunks:
+        return tips
+
+    over_budget = sum(1 for c in chunks if c.token_estimate > max_chunk_tokens)
+    if over_budget:
+        tips.append(
+            f"{over_budget} chunk(s) exceed the {max_chunk_tokens:,}-token budget "
+            "because a single line (often a table or one-line paragraph) cannot "
+            "be split. Raise the chunk size to absorb them, or accept them "
+            "knowingly — for RAG they reduce retrieval precision."
+        )
+
+    heading_count = sum(
+        len(c.structure.headings) for c in chunks if c.structure is not None
+    )
+    if chunk_strategy != "headings" and heading_count >= 3 * len(converted):
+        tips.append(
+            f"The corpus is heading-rich ({heading_count} headings across "
+            f"{len(converted)} document(s)). The 'headings' strategy would align "
+            "chunk boundaries with the documents' own sections, which usually "
+            "retrieves and cites better than paragraph packing."
+        )
+
+    tiny_threshold = max(30, max_chunk_tokens // 10)
+    tiny = sum(1 for c in chunks if c.token_estimate < tiny_threshold)
+    if chunk_strategy == "headings" and tiny > len(chunks) // 4:
+        tips.append(
+            f"{tiny} of {len(chunks)} chunks are under {tiny_threshold} tokens — "
+            "typically small metadata or boilerplate sections. Deselect them "
+            "during review, split at a shallower heading level so they merge "
+            "into neighbors, or accept them if those fields matter for lookup."
+        )
+
+    single_chunk_docs = sum(1 for p in converted if len(p.chunks) == 1)
+    if single_chunk_docs > len(converted) // 2 and len(converted) > 1:
+        tips.append(
+            f"{single_chunk_docs} of {len(converted)} document(s) fit in a single "
+            "chunk, so chunking has no effect on them. That is fine for project "
+            "bundles; for RAG, a smaller chunk size gives retrieval more focused "
+            "passages to match."
+        )
+
+    if target == "rag" and max_chunk_tokens > 1500:
+        tips.append(
+            f"The chunk size ({max_chunk_tokens:,} tokens) is large for RAG. "
+            "Retrieval precision usually improves between roughly 300 and 800 "
+            "tokens per chunk, where each chunk holds one self-contained idea."
+        )
+
+    return tips
 
 
 def _normalize_extensions(values: Optional[Iterable[str]]) -> Tuple[str, ...]:

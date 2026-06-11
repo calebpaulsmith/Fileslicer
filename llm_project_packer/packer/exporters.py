@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import List
 
 from .bundler import Bundle, ConvertedDoc
-from .chunking import chunk_markdown
+from .chunking import (
+    DEFAULT_HEADING_LEVEL,
+    STRATEGY_HEADINGS,
+    STRATEGY_TOKENS,
+    chunk_markdown,
+    chunk_markdown_by_headings_with_reasons,
+)
 from .manifest import Manifest
 from .token_estimator import estimate_tokens, estimator_backend
 
@@ -233,6 +239,27 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         "If you want overlap, smaller chunks, or sentence-level splitting, pre-process "
         "`chunks.jsonl` before embedding.",
         "",
+        "## Optimizing this export for retrieval",
+        "",
+        "- **Chunk size:** retrieval works best when each chunk holds one "
+        "self-contained idea. Roughly 300–800 tokens per chunk is a good "
+        "starting range; very large chunks dilute retrieval precision and "
+        "very small ones lose context.",
+        "- **Respect document structure:** chunks that align with headings or "
+        "record fields retrieve better than chunks that cut across sections. "
+        "Use the chunk review screen's heading strategy (or pre-process) so "
+        "boundaries follow the document's own structure.",
+        "- **Trim boilerplate before embedding:** repeated headers, footers, "
+        "duplicated HTML renderings of the same text, and scrape metadata "
+        "add embedding cost and pollute results. Deselect those chunks "
+        "during review instead of embedding them.",
+        "- **Keep identifiers with content:** each chunk's `doc_id` and "
+        "`source_path` come along in the JSONL; store them with your "
+        "embeddings so answers can cite the source document.",
+        "- **Watch over-budget chunks:** chunks larger than the budget come "
+        "from single unbreakable lines (often tables). Consider reworking "
+        "those source files or accepting the oversize chunks knowingly.",
+        "",
         "## Notes",
         "",
         _DISCLAIMER,
@@ -258,8 +285,15 @@ def write_rag_export(
     rag_dir: Path,
     converted_docs: List[ConvertedDoc],
     max_chunk_tokens: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
 ) -> None:
-    """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``."""
+    """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``.
+
+    The default token strategy preserves V1 output exactly. Callers that ran
+    chunk review can pass ``chunk_strategy``/``heading_level`` so the JSONL
+    chunks match what the user previewed.
+    """
     rag_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = rag_dir / "chunks.jsonl"
     source_map_path = rag_dir / "source_map.json"
@@ -288,7 +322,15 @@ def write_rag_export(
                 }
                 continue
 
-            chunk_texts = chunk_markdown(text, max_chunk_tokens)
+            if chunk_strategy == STRATEGY_HEADINGS:
+                chunk_texts = [
+                    chunk_text
+                    for chunk_text, _ in chunk_markdown_by_headings_with_reasons(
+                        text, max_chunk_tokens, heading_level
+                    )
+                ]
+            else:
+                chunk_texts = chunk_markdown(text, max_chunk_tokens)
             chunk_ids: List[str] = []
             for i, chunk_text in enumerate(chunk_texts, start=1):
                 chunk_id = f"{doc.entry.doc_id}__c{i:03d}"

@@ -63,14 +63,19 @@ UI flow:
 2. Set project name, source folder, output folder, target, and mode.
 3. Click `Scan Source Folder`.
 4. Review files and include/exclude what should be packed.
-5. Optionally open `Document chunk review`, preview how an included document
-   splits into token-sized chunks, and deselect the portions you don't want
-   exported. Each chunk shows its first heading, a structure summary
-   (headings, paragraphs, list items, table rows), and the reason its
-   boundary was drawn, and a corpus chunking audit shows how the current
-   chunk size behaves across every included document — use these to tune
-   the chunk size before exporting. Documents without a chunk selection
-   export in full; trimmed documents are noted in the manifest.
+5. Optionally open `Document chunk review`, pick a chunking strategy —
+   token packing or heading sections (a new chunk at every heading of the
+   chosen level) — preview how an included document splits into chunks, and
+   deselect the portions you don't want exported. Each chunk shows its
+   first heading, a structure summary (headings, paragraphs, list items,
+   table rows), and the reason its boundary was drawn. The corpus chunking
+   audit applies the current settings to every included document and adds
+   `Chunking guidance`: plain-language tips on over-budget chunks,
+   heading-rich corpora, boilerplate sections, and RAG-friendly chunk
+   sizes. For RAG exports, `rag_ready/chunks.jsonl` uses the reviewed chunk
+   settings, and `00_RAG_EXPORT_NOTES.md` includes retrieval-optimization
+   tips. Documents without a chunk selection export in full; trimmed
+   documents are noted in the manifest.
 6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
 7. Check the preview: included/skipped counts, target/mode, bundle budget,

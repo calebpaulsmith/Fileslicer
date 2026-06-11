@@ -134,6 +134,27 @@ Already shipped:
   selections for unprocessed files produce warnings without failing the
   run. Documents without a chunk selection export in full. The CLI is
   unchanged.
+- Chunking strategies and guidance (approved pull-forward of the V3
+  "chunking by heading" candidate; the richer strategies stay V3):
+  `chunking.STRATEGY_TOKENS` (V1 paragraph packing) and
+  `chunking.STRATEGY_HEADINGS` (`split_into_heading_sections` +
+  `chunk_markdown_by_headings_with_reasons`: a new chunk starts at every
+  heading of the chosen level or shallower, deeper headings stay inside
+  their section, oversize sections fall back to the token chunker, and
+  documents without qualifying headings fall back entirely).
+  `run_packaging_job` accepts `chunk_strategy` and `chunk_heading_level`;
+  chunk-selection re-chunking and `preview_document_chunks` honor them.
+  For `--target rag`, a provided `chunk_token_budget`/`chunk_strategy`
+  shapes `rag_ready/chunks.jsonl`; without them V1 output is byte-identical.
+  The UI's chunk review has a strategy selector and heading-level control,
+  clears selections made under different settings, and always passes the
+  current review settings to export so a UI RAG export matches the preview.
+  `pipeline.chunking_guidance(previews, budget, strategy, target)` turns a
+  corpus audit into plain-language tips (over-budget chunks, heading-rich
+  corpora, tiny boilerplate chunks, single-chunk documents, RAG chunk-size
+  range); the corpus audit expander renders them under "Chunking guidance".
+  Documented generated-file change: `00_RAG_EXPORT_NOTES.md` gained an
+  "Optimizing this export for retrieval" section with static RAG tips.
 - Project profile storage in `packer/profiles.py`:
   - `Profile` dataclass (16 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
@@ -167,8 +188,8 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (6 cases), `test_chunking.py` (15 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (26 cases) — 53 in
+  `test_pipeline.py` (14 cases), `test_chunking.py` (22 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (26 cases) — 68 in
   total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -213,8 +234,9 @@ Candidate Version 3 features:
 - richer audit dashboard: duplicate candidates, stale sources, image-heavy
   docs, OCR-needed flags, broken links/assets, sensitive-data warnings, and
   source-quality notes;
-- chunking strategies by heading, page, token count, code symbol, legal issue,
-  repair procedure, disaster/applicant/project, or semantic topic;
+- chunking strategies beyond the shipped token/heading pair: by page, code
+  symbol, legal issue, repair procedure, disaster/applicant/project, or
+  semantic topic;
 - visual/manual enhancements: diagram index, image-reference preservation,
   optional visual companion export, and image handling controls;
 - source quality scoring and deduplication;
@@ -344,8 +366,18 @@ Manual Streamlit inputs and expected outputs:
 - Open `Corpus chunking audit`, click `Analyze corpus chunking`.
   Expected: totals for documents/chunks/tokens, smallest/median/largest
   chunk sizes, a boundary-reason breakdown table, a per-document table with
-  chunk counts and over-budget flags, and a warning when any chunk exceeds
-  the budget (long unbreakable lines).
+  chunk counts and over-budget flags, a warning when any chunk exceeds
+  the budget (long unbreakable lines), and a `Chunking guidance` block with
+  plain-language tips (or a "nothing stood out" caption).
+- Switch `Chunking strategy` to `Heading sections (split at headings)`,
+  preview a document with headings (e.g., a converted JSON record).
+  Expected: one chunk per heading section with boundary reason
+  `section starts at a heading`; selections made under the token strategy
+  are cleared with an info message; `Split at heading level` appears.
+- With the heading strategy and `--target rag` semantics in mind, export a
+  RAG profile from the UI after setting chunk size/strategy.
+  Expected: the preview warns which chunk settings `rag_ready/chunks.jsonl`
+  will use, and the JSONL chunk boundaries match the previewed chunks.
 - Uncheck one chunk, then export.
   Expected: the preview warns that one document has a partial chunk
   selection, the bundle omits the deselected chunk's text, and the manifest

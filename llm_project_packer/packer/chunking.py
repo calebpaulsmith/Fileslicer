@@ -20,6 +20,13 @@ REASON_BUDGET_REACHED = "token budget reached; split before the next paragraph"
 REASON_BEFORE_OVERSIZE = "flushed before a paragraph larger than the budget"
 REASON_OVERSIZE_SPLIT = "oversize paragraph split at line boundaries"
 REASON_END_OF_DOCUMENT = "end of document"
+REASON_HEADING_SECTION = "section starts at a heading"
+REASON_PREAMBLE = "content before the first heading"
+
+STRATEGY_TOKENS = "tokens"
+STRATEGY_HEADINGS = "headings"
+STRATEGIES = (STRATEGY_TOKENS, STRATEGY_HEADINGS)
+DEFAULT_HEADING_LEVEL = 2
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
@@ -118,11 +125,28 @@ def chunk_markdown_with_reasons(text: str, max_tokens: int) -> List[Tuple[str, s
     return chunks
 
 
-def chunk_document(body_markdown: str, max_tokens: int) -> List[Chunk]:
-    """Chunk a converted document body into indexed, annotated chunks."""
+def chunk_document(
+    body_markdown: str,
+    max_tokens: int,
+    strategy: str = STRATEGY_TOKENS,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> List[Chunk]:
+    """Chunk a converted document body into indexed, annotated chunks.
+
+    ``strategy`` is one of :data:`STRATEGIES`. The ``tokens`` strategy packs
+    paragraphs greedily against the budget. The ``headings`` strategy never
+    merges content across headings of level ``heading_level`` or shallower:
+    each section becomes its own chunk, with the token chunker applied only
+    inside sections that exceed the budget. Documents without qualifying
+    headings fall back to the token strategy.
+    """
     text = (body_markdown or "").strip()
     if not text:
         return []
+    if strategy == STRATEGY_HEADINGS:
+        pairs = chunk_markdown_by_headings_with_reasons(text, max_tokens, heading_level)
+    else:
+        pairs = chunk_markdown_with_reasons(text, max_tokens)
     return [
         Chunk(
             index=i,
@@ -131,10 +155,65 @@ def chunk_document(body_markdown: str, max_tokens: int) -> List[Chunk]:
             boundary_reason=reason,
             structure=analyze_markdown_structure(chunk_text),
         )
-        for i, (chunk_text, reason) in enumerate(
-            chunk_markdown_with_reasons(text, max_tokens), start=1
-        )
+        for i, (chunk_text, reason) in enumerate(pairs, start=1)
     ]
+
+
+def split_into_heading_sections(text: str, heading_level: int) -> List[str]:
+    """Split text into sections that start at headings of ``heading_level``
+    or shallower. Content before the first qualifying heading is its own
+    section. Headings inside fenced code blocks are ignored."""
+    sections: List[str] = []
+    current: List[str] = []
+    in_code_fence = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+        if not in_code_fence:
+            heading = _HEADING_RE.match(stripped)
+            if heading and len(heading.group(1)) <= heading_level and current:
+                section = "\n".join(current).strip()
+                if section:
+                    sections.append(section)
+                current = []
+        current.append(line)
+    section = "\n".join(current).strip()
+    if section:
+        sections.append(section)
+    return sections
+
+
+def chunk_markdown_by_headings_with_reasons(
+    text: str,
+    max_tokens: int,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> List[Tuple[str, str]]:
+    """Heading-aligned chunking: one chunk per heading section, with the
+    token chunker applied inside sections larger than the budget."""
+    sections = split_into_heading_sections(text, heading_level)
+    if not sections:
+        return []
+    if len(sections) == 1 and not _starts_with_heading(sections[0], heading_level):
+        return chunk_markdown_with_reasons(sections[0], max_tokens)
+
+    pairs: List[Tuple[str, str]] = []
+    for section in sections:
+        if _starts_with_heading(section, heading_level):
+            section_reason = REASON_HEADING_SECTION
+        else:
+            section_reason = REASON_PREAMBLE
+        if max_tokens <= 0 or estimate_tokens(section) <= max_tokens:
+            pairs.append((section, section_reason))
+        else:
+            pairs.extend(chunk_markdown_with_reasons(section, max_tokens))
+    return pairs
+
+
+def _starts_with_heading(section: str, heading_level: int) -> bool:
+    first_line = section.split("\n", 1)[0].strip()
+    heading = _HEADING_RE.match(first_line)
+    return heading is not None and len(heading.group(1)) <= heading_level
 
 
 def analyze_markdown_structure(text: str) -> ChunkStructure:
