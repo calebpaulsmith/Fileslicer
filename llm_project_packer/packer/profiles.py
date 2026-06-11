@@ -47,6 +47,7 @@ ACTIVE_FIELDS: Sequence[str] = (
     "max_bundle_tokens",
     "include_extensions",
     "exclude_dirs",
+    "chunk_exclude_headings",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -79,6 +80,7 @@ class Profile:
     max_bundle_tokens: Optional[int] = None
     include_extensions: List[str] = field(default_factory=list)
     exclude_dirs: List[str] = field(default_factory=list)
+    chunk_exclude_headings: List[str] = field(default_factory=list)
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -109,6 +111,8 @@ class Profile:
             raise ValueError("include_extensions must be a list of strings.")
         if not isinstance(self.exclude_dirs, list):
             raise ValueError("exclude_dirs must be a list of strings.")
+        if not isinstance(self.chunk_exclude_headings, list):
+            raise ValueError("chunk_exclude_headings must be a list of strings.")
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the profile to a JSON-friendly dict, including a schema tag."""
@@ -125,6 +129,11 @@ class Profile:
             kwargs["include_extensions"] = list(kwargs["include_extensions"])
         if "exclude_dirs" in kwargs and kwargs["exclude_dirs"] is not None:
             kwargs["exclude_dirs"] = list(kwargs["exclude_dirs"])
+        if (
+            "chunk_exclude_headings" in kwargs
+            and kwargs["chunk_exclude_headings"] is not None
+        ):
+            kwargs["chunk_exclude_headings"] = list(kwargs["chunk_exclude_headings"])
         return cls(**kwargs)
 
     def to_packaging_kwargs(
@@ -162,6 +171,7 @@ class Profile:
             "max_bundle_tokens": self.max_bundle_tokens,
             "include_extensions": list(self.include_extensions) or None,
             "exclude_dirs": list(self.exclude_dirs) or None,
+            "chunk_exclude_headings": list(self.chunk_exclude_headings) or None,
         }
         return kwargs
 

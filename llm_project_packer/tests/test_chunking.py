@@ -21,6 +21,7 @@ from packer.chunking import (  # noqa: E402
     chunk_markdown,
     chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
+    match_heading_patterns,
     split_into_heading_sections,
 )
 
@@ -176,6 +177,31 @@ class HeadingChunkingTests(unittest.TestCase):
         text = "## Real\n\nBody.\n\n```\n## fake heading\n```\n\nMore body.\n"
         sections = split_into_heading_sections(text, 2)
         self.assertEqual(len(sections), 1)
+
+
+class MatchHeadingPatternsTests(unittest.TestCase):
+    def test_exact_match_is_case_insensitive(self) -> None:
+        self.assertEqual(
+            match_heading_patterns("Content_Hash", ("content_hash",)),
+            ("content_hash",),
+        )
+
+    def test_glob_wildcards_match(self) -> None:
+        self.assertEqual(
+            match_heading_patterns("appeal_letter_html", ("*_html",)),
+            ("*_html",),
+        )
+        self.assertEqual(match_heading_patterns("appeal_letter_text", ("*_html",)), ())
+
+    def test_blank_heading_and_blank_patterns_never_match(self) -> None:
+        self.assertEqual(match_heading_patterns("", ("*",)), ())
+        self.assertEqual(match_heading_patterns("title", ("", "  ")), ())
+
+    def test_returns_every_matching_pattern(self) -> None:
+        self.assertEqual(
+            match_heading_patterns("url", ("url", "u*", "slug")),
+            ("url", "u*"),
+        )
 
 
 class StructureAnalysisTests(unittest.TestCase):

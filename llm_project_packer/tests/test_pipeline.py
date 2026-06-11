@@ -265,6 +265,128 @@ class PipelineTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class ChunkRuleTests(unittest.TestCase):
+    def make_tempdir(self) -> Path:
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        path = TEST_TMP_ROOT / f"case_{uuid.uuid4().hex}"
+        path.mkdir()
+        return path
+
+    RECORD = (
+        "## url\n\nhttps://example.com/case\n\n"
+        "## summary\n\nThe storm damaged the hall.\n\n"
+        "## letter_html\n\n<p>html copy</p>\n"
+    )
+
+    def test_heading_rules_trim_matching_chunks_corpus_wide(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "a.md").write_text(self.RECORD, encoding="utf-8")
+            (source / "b.md").write_text(self.RECORD, encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_exclude_headings=["url", "*_html"],
+            )
+            bundle_text = result.bundle_paths[0].read_text(encoding="utf-8")
+            self.assertIn("The storm damaged the hall.", bundle_text)
+            self.assertNotIn("https://example.com/case", bundle_text)
+            self.assertNotIn("html copy", bundle_text)
+            manifest_text = result.manifest_paths["markdown"].read_text(encoding="utf-8")
+            self.assertIn("corpus heading rules", manifest_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_explicit_selection_overrides_rules(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "a.md").write_text(self.RECORD, encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                chunk_selections={"a.md": [1, 2, 3]},
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_exclude_headings=["url", "*_html"],
+            )
+            bundle_text = result.bundle_paths[0].read_text(encoding="utf-8")
+            self.assertIn("https://example.com/case", bundle_text)
+            self.assertIn("html copy", bundle_text)
+            self.assertTrue(
+                any("matched no chunks" in w for w in result.warnings),
+                result.warnings,
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_all_chunks_matching_rules_skips_document(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "meta.md").write_text(
+                "## url\n\nhttps://example.com\n", encoding="utf-8"
+            )
+            (source / "keep.md").write_text(
+                "## summary\n\nKeep me.\n", encoding="utf-8"
+            )
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_exclude_headings=["url"],
+            )
+            self.assertEqual(result.skipped_count, 1)
+            bundle_text = result.bundle_paths[0].read_text(encoding="utf-8")
+            self.assertIn("Keep me.", bundle_text)
+            self.assertNotIn("example.com", bundle_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_unmatched_rule_warns_without_failing(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "a.md").write_text("## summary\n\nText.\n", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_exclude_headings=["no_such_field"],
+            )
+            self.assertEqual(result.processed_count, 1)
+            self.assertTrue(
+                any("matched no chunks" in w for w in result.warnings)
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class ChunkingGuidanceTests(unittest.TestCase):
     @staticmethod
     def preview(token_sizes: list[int], headings_per_chunk: int = 0) -> DocumentChunkPreview:

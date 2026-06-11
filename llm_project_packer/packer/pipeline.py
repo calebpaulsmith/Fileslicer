@@ -20,6 +20,7 @@ from .chunking import (
     STRATEGY_TOKENS,
     Chunk,
     chunk_document,
+    match_heading_patterns,
 )
 from .config import PackerConfig
 from .exporters import (
@@ -78,6 +79,7 @@ def run_packaging_job(
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_exclude_headings: Optional[Sequence[str]] = None,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -97,6 +99,12 @@ def run_packaging_job(
     For the ``rag`` target a provided ``chunk_token_budget`` and strategy
     also shape ``rag_ready/chunks.jsonl``; without them the V1 token-based
     behavior is unchanged.
+
+    ``chunk_exclude_headings`` is a corpus-wide rule set: glob patterns
+    (case-insensitive, e.g. ``*_html``) matched against each chunk's first
+    heading. Matching chunks are dropped from every document that has no
+    explicit entry in ``chunk_selections`` — an explicit per-document
+    selection always wins over the rules.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -125,6 +133,7 @@ def run_packaging_job(
         chunk_token_budget=chunk_token_budget,
         chunk_strategy=chunk_strategy,
         chunk_heading_level=chunk_heading_level,
+        chunk_exclude_headings=chunk_exclude_headings,
         progress_callback=progress_callback,
     )
 
@@ -137,6 +146,7 @@ def run_packaging_config(
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_exclude_headings: Optional[Sequence[str]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -208,10 +218,11 @@ def run_packaging_config(
         data_dir=data_dir,
     )
     converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
-    if chunk_selections:
+    if chunk_selections or chunk_exclude_headings:
         converted_docs = _apply_chunk_selections(
             converted_docs,
-            chunk_selections=chunk_selections,
+            chunk_selections=chunk_selections or {},
+            exclude_headings=tuple(chunk_exclude_headings or ()),
             max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
@@ -354,6 +365,7 @@ def _apply_chunk_selections(
     converted_docs: List[ConvertedDoc],
     *,
     chunk_selections: Mapping[str, Sequence[int]],
+    exclude_headings: Sequence[str] = (),
     max_chunk_tokens: int,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
@@ -365,12 +377,28 @@ def _apply_chunk_selections(
         _included_key(path, source_dir): tuple(int(i) for i in indices)
         for path, indices in chunk_selections.items()
     }
+    patterns = tuple(p.strip() for p in exclude_headings if p and p.strip())
+    pattern_hits: Dict[str, int] = {pattern: 0 for pattern in patterns}
     matched: set[str] = set()
     kept_docs: List[ConvertedDoc] = []
     for doc in converted_docs:
         key = doc.entry.source_path.lower()
         if key not in normalized:
-            kept_docs.append(doc)
+            if patterns:
+                kept_docs.extend(
+                    _apply_heading_rules(
+                        doc,
+                        patterns=patterns,
+                        pattern_hits=pattern_hits,
+                        max_chunk_tokens=max_chunk_tokens,
+                        chunk_strategy=chunk_strategy,
+                        chunk_heading_level=chunk_heading_level,
+                        warnings=warnings,
+                        emit=emit,
+                    )
+                )
+            else:
+                kept_docs.append(doc)
             continue
         matched.add(key)
         requested = normalized[key]
@@ -424,7 +452,70 @@ def _apply_chunk_selections(
         warning = f"Chunk selection ignored for unprocessed or excluded file: {key}"
         warnings.append(warning)
         emit("warning", f"  Warning: {warning}")
+    for pattern, hits in pattern_hits.items():
+        if hits == 0:
+            warning = f"Heading exclusion rule matched no chunks: {pattern!r}"
+            warnings.append(warning)
+            emit("warning", f"  Warning: {warning}")
     return kept_docs
+
+
+def _apply_heading_rules(
+    doc: ConvertedDoc,
+    *,
+    patterns: Tuple[str, ...],
+    pattern_hits: Dict[str, int],
+    max_chunk_tokens: int,
+    chunk_strategy: str,
+    chunk_heading_level: int,
+    warnings: List[str],
+    emit: Callable[..., None],
+) -> List[ConvertedDoc]:
+    chunks = chunk_document(
+        doc.body_markdown,
+        max_chunk_tokens,
+        strategy=chunk_strategy,
+        heading_level=chunk_heading_level,
+    )
+    kept_chunks: List[Chunk] = []
+    excluded = 0
+    for chunk in chunks:
+        hits = match_heading_patterns(chunk.first_heading, patterns)
+        if hits:
+            excluded += 1
+            for pattern in hits:
+                pattern_hits[pattern] += 1
+        else:
+            kept_chunks.append(chunk)
+    if not excluded:
+        return [doc]
+    if not kept_chunks:
+        doc.entry.status = "skipped"
+        doc.entry.token_estimate = 0
+        doc.entry.notes = _append_note(
+            doc.entry.notes,
+            f"All {len(chunks)} chunks matched corpus heading rules; content omitted.",
+        )
+        warning = (
+            f"{doc.entry.doc_id} {doc.entry.source_path}: every chunk matched "
+            "the heading exclusion rules; document omitted from export."
+        )
+        warnings.append(warning)
+        emit("chunk_doc_omitted", f"  {warning}", {"doc_id": doc.entry.doc_id})
+        return []
+    trimmed_body = "\n\n".join(chunk.text for chunk in kept_chunks)
+    trimmed_doc = make_converted_doc(doc.entry, trimmed_body)
+    trimmed_doc.entry.token_estimate = trimmed_doc.token_estimate
+    trimmed_doc.entry.notes = _append_note(
+        trimmed_doc.entry.notes,
+        f"Excluded {excluded} of {len(chunks)} chunks via corpus heading rules.",
+    )
+    emit(
+        "chunk_rules_applied",
+        f"  {doc.entry.doc_id}: excluded {excluded} of {len(chunks)} chunks by heading rules.",
+        {"doc_id": doc.entry.doc_id, "excluded": excluded, "total": len(chunks)},
+    )
+    return [trimmed_doc]
 
 
 def _append_note(existing: str, note: str) -> str:

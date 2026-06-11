@@ -155,8 +155,22 @@ Already shipped:
   range); the corpus audit expander renders them under "Chunking guidance".
   Documented generated-file change: `00_RAG_EXPORT_NOTES.md` gained an
   "Optimizing this export for retrieval" section with static RAG tips.
+- Corpus chunk rules: `Profile.chunk_exclude_headings` (active field) holds
+  case-insensitive glob patterns (e.g. `*_html`, `content_hash`) matched by
+  `chunking.match_heading_patterns` against each chunk's first heading.
+  `run_packaging_job(chunk_exclude_headings=...)` drops matching chunks
+  from every document that has no explicit `chunk_selections` entry — an
+  explicit per-document selection always wins. Trimmed documents get an
+  "Excluded m of n chunks via corpus heading rules" manifest note; a
+  document whose chunks all match is recorded as `status=skipped`; rules
+  that match nothing produce warnings without failing the run. In the UI
+  the rules live in a text input in chunk review (bound to the profile and
+  saved with it), rule-matched chunks default to deselected in per-document
+  previews, the corpus audit shows per-rule match counts and flags rules
+  that match nothing, and changing the rules clears selections like any
+  other chunk-setting change.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (16 fields total) + `save_profile`,
+  - `Profile` dataclass (17 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -165,10 +179,11 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the eight fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the nine fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
-    `include_extensions`, `exclude_dirs`). `profiles.INERT_FIELDS` lists
+    `include_extensions`, `exclude_dirs`, `chunk_exclude_headings`).
+    `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
     `spreadsheet_preview_rows`, `include_pdf_page_headers`,
@@ -188,8 +203,8 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (14 cases), `test_chunking.py` (22 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (26 cases) — 68 in
+  `test_pipeline.py` (18 cases), `test_chunking.py` (26 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (28 cases) — 78 in
   total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -389,6 +404,14 @@ Manual Streamlit inputs and expected outputs:
 - Change `Chunk size (tokens)` after making a selection.
   Expected: selections made at the old size are cleared and an info message
   reports how many were reset.
+- Enter `url, *_html` in `Corpus chunk rules`, preview a converted JSON
+  record with the heading strategy.
+  Expected: chunks whose first heading matches default to deselected with
+  an info message; the corpus audit lists per-rule match counts; export
+  trims matching chunks from documents that were never previewed and the
+  manifest notes `Excluded m of n chunks via corpus heading rules`; a rule
+  matching nothing produces a warning, and an explicit per-document
+  selection overrides the rules for that document.
 
 After a run, inspect the newest folder under `.\test_output\`:
 
