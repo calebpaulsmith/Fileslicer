@@ -238,8 +238,8 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (22 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (31 cases) — 85 in
+  `test_pipeline.py` (24 cases), `test_chunking.py` (26 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (31 cases) — 87 in
   total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -302,7 +302,11 @@ early.
 
 - No automated upload to ChatGPT, Claude, or any other LLM provider.
 - No login automation, OAuth flows, or browser automation.
-- No cloud hosting, no server, no remote storage.
+- No cloud hosting, no hosted or remote server, no remote storage. The one
+  sanctioned exception is the `cowork` target's generated MCP server: it
+  runs locally over stdio, serves only files inside its own export folder,
+  and the user registers it with their MCP-aware client by hand — the tool
+  never starts it, registers it, or exposes it to the network.
 - No claims that token presets equal official platform context-window limits.
 - No new heavyweight dependencies without a clear reason; `tiktoken` stays
   optional.

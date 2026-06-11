@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "fileslicer_sample_input": {
+      "command": "python",
+      "args": [
+        "/home/user/Fileslicer/test_output/sample_input_cowork_balanced_20260611_121604/mcp_server/server.py"
+      ]
+    }
+  }
+}
