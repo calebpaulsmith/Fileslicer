@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,6 +64,8 @@ def read_file(file: ScannedFile, doc_id: str, ctx: ReaderContext) -> ReaderResul
             return _read_csv(file, doc_id, ctx)
         if file.file_type == "xlsx":
             return _read_xlsx(file, doc_id, ctx)
+        if file.file_type == "json":
+            return _read_json(file)
         if file.file_type == "image":
             return _read_image(file, doc_id, ctx)
         return ReaderResult(
@@ -529,6 +532,73 @@ def _read_xlsx(file: ScannedFile, doc_id: str, ctx: ReaderContext) -> ReaderResu
         word_count=len(md.split()),
         copied_assets=copied,
     )
+
+
+# ----------------------------------------------------------------------------
+# JSON
+# ----------------------------------------------------------------------------
+
+
+def _read_json(file: ScannedFile) -> ReaderResult:
+    """Render structured JSON as Markdown with one heading per field.
+
+    Object keys become headings (top level at ``##``, nested objects one
+    level deeper), so heading-aware tooling — chunk review, structure
+    summaries, and future heading-based chunking rules — sees the record's
+    own field boundaries. Values are never dropped: nulls and empty
+    containers are rendered explicitly.
+    """
+    raw = _read_text_with_fallback(file.absolute_path)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return ReaderResult(
+            markdown="",
+            status="failed",
+            notes=f"Invalid JSON: {exc}",
+        )
+
+    parts: List[str] = [f"# JSON: {file.relative_path.name}\n"]
+    parts.extend(_json_value_to_markdown(data, level=2))
+    md = mdu.normalize_newlines("\n".join(parts))
+    return ReaderResult(
+        markdown=md,
+        status="ok",
+        char_count=len(md),
+        word_count=len(md.split()),
+    )
+
+
+def _json_value_to_markdown(value: object, level: int) -> List[str]:
+    if isinstance(value, dict):
+        if not value:
+            return ["(empty object)", ""]
+        lines: List[str] = []
+        for key, item in value.items():
+            lines.append(f"{'#' * min(level, 6)} {key}")
+            lines.append("")
+            lines.extend(_json_value_to_markdown(item, level + 1))
+        return lines
+    if isinstance(value, list):
+        if not value:
+            return ["(empty list)", ""]
+        if all(not isinstance(item, (dict, list)) for item in value):
+            return [f"- {_json_scalar(item)}" for item in value] + [""]
+        lines = []
+        for position, item in enumerate(value, start=1):
+            lines.append(f"{'#' * min(level, 6)} item {position}")
+            lines.append("")
+            lines.extend(_json_value_to_markdown(item, level + 1))
+        return lines
+    return [_json_scalar(value), ""]
+
+
+def _json_scalar(value: object) -> str:
+    if value is None:
+        return "(null)"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
 
 
 # ----------------------------------------------------------------------------

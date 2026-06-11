@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import presets
 from .bundler import (
@@ -13,6 +14,13 @@ from .bundler import (
     make_converted_doc,
     split_into_bundles,
     write_bundle,
+)
+from .chunking import (
+    DEFAULT_HEADING_LEVEL,
+    STRATEGY_TOKENS,
+    Chunk,
+    chunk_document,
+    match_heading_patterns,
 )
 from .config import PackerConfig
 from .exporters import (
@@ -25,7 +33,7 @@ from .exporters import (
 from .manifest import Manifest, ManifestEntry
 from .markdown_utils import doc_id_for_index, safe_filename
 from .readers import ReaderContext, read_file
-from .scanner import ScannedFile, scan_directory
+from .scanner import ScannedFile, match_path_patterns, scan_directory
 from .token_estimator import estimate_tokens, estimator_backend
 
 
@@ -68,6 +76,12 @@ def run_packaging_job(
     include_extensions: Optional[Iterable[str]] = None,
     exclude_dirs: Optional[Iterable[str]] = None,
     included_files: Optional[Iterable[Path | str]] = None,
+    exclude_files: Optional[Sequence[str]] = None,
+    chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
+    chunk_token_budget: Optional[int] = None,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_exclude_headings: Optional[Sequence[str]] = None,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -76,6 +90,29 @@ def run_packaging_job(
     This is the public backend entry point intended for both the current CLI
     and future UI adapters. The UI should pass user selections here instead of
     duplicating scan, convert, bundle, manifest, or export logic.
+
+    ``chunk_selections`` maps source-relative paths to the 1-based chunk
+    indices to keep, where chunks are computed by
+    ``chunking.chunk_document(body, chunk_token_budget)``. Documents without
+    an entry keep their full content; an explicit empty selection records the
+    document as skipped. ``chunk_token_budget`` defaults to the resolved
+    bundle token budget and, with ``chunk_strategy`` and
+    ``chunk_heading_level``, must match the settings used to preview chunks.
+    For the ``rag`` target a provided ``chunk_token_budget`` and strategy
+    also shape ``rag_ready/chunks.jsonl``; without them the V1 token-based
+    behavior is unchanged.
+
+    ``chunk_exclude_headings`` is a corpus-wide rule set: glob patterns
+    (case-insensitive, e.g. ``*_html``) matched against each chunk's first
+    heading. Matching chunks are dropped from every document that has no
+    explicit entry in ``chunk_selections`` — an explicit per-document
+    selection always wins over the rules.
+
+    ``exclude_files`` holds glob patterns matched against source-relative
+    paths (see ``scanner.match_path_patterns``); matching files are dropped
+    after the scan and never appear in the manifest. ``included_files`` is
+    an explicit allowlist that already encodes any exclusions, so callers
+    pass one or the other, not both.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -100,6 +137,12 @@ def run_packaging_job(
     return run_packaging_config(
         cfg,
         included_files=included_file_list,
+        exclude_files=exclude_files,
+        chunk_selections=chunk_selections,
+        chunk_token_budget=chunk_token_budget,
+        chunk_strategy=chunk_strategy,
+        chunk_heading_level=chunk_heading_level,
+        chunk_exclude_headings=chunk_exclude_headings,
         progress_callback=progress_callback,
     )
 
@@ -108,6 +151,12 @@ def run_packaging_config(
     cfg: PackerConfig,
     *,
     included_files: Optional[Iterable[Path | str]] = None,
+    exclude_files: Optional[Sequence[str]] = None,
+    chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
+    chunk_token_budget: Optional[int] = None,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_exclude_headings: Optional[Sequence[str]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -150,6 +199,11 @@ def run_packaging_config(
     warnings.extend(include_warnings)
     for warning in include_warnings:
         emit("warning", f"  Warning: {warning}")
+    if exclude_files:
+        files, exclude_warnings = _apply_excluded_files_filter(files, exclude_files)
+        warnings.extend(exclude_warnings)
+        for warning in exclude_warnings:
+            emit("warning", f"  Warning: {warning}")
 
     emit("scan_done", f"  Found {len(files)} files to record/process.", {"count": len(files)})
     if not files:
@@ -179,6 +233,18 @@ def run_packaging_config(
         data_dir=data_dir,
     )
     converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
+    if chunk_selections or chunk_exclude_headings:
+        converted_docs = _apply_chunk_selections(
+            converted_docs,
+            chunk_selections=chunk_selections or {},
+            exclude_headings=tuple(chunk_exclude_headings or ()),
+            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            chunk_strategy=chunk_strategy,
+            chunk_heading_level=chunk_heading_level,
+            source_dir=cfg.source_dir,
+            warnings=warnings,
+            emit=emit,
+        )
 
     bundle_paths: List[Path] = []
     bundle_filenames: List[str] = []
@@ -216,7 +282,9 @@ def run_packaging_config(
         write_rag_export(
             rag_dir,
             converted_docs=converted_docs,
-            max_chunk_tokens=cfg.max_bundle_tokens,
+            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            chunk_strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
         if cfg.target == "cowork":
@@ -323,6 +391,282 @@ def _convert_files(
     return converted_docs
 
 
+def _apply_chunk_selections(
+    converted_docs: List[ConvertedDoc],
+    *,
+    chunk_selections: Mapping[str, Sequence[int]],
+    exclude_headings: Sequence[str] = (),
+    max_chunk_tokens: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    source_dir: Path,
+    warnings: List[str],
+    emit: Callable[..., None],
+) -> List[ConvertedDoc]:
+    normalized = {
+        _included_key(path, source_dir): tuple(int(i) for i in indices)
+        for path, indices in chunk_selections.items()
+    }
+    patterns = tuple(p.strip() for p in exclude_headings if p and p.strip())
+    pattern_hits: Dict[str, int] = {pattern: 0 for pattern in patterns}
+    matched: set[str] = set()
+    kept_docs: List[ConvertedDoc] = []
+    for doc in converted_docs:
+        key = doc.entry.source_path.lower()
+        if key not in normalized:
+            if patterns:
+                kept_docs.extend(
+                    _apply_heading_rules(
+                        doc,
+                        patterns=patterns,
+                        pattern_hits=pattern_hits,
+                        max_chunk_tokens=max_chunk_tokens,
+                        chunk_strategy=chunk_strategy,
+                        chunk_heading_level=chunk_heading_level,
+                        warnings=warnings,
+                        emit=emit,
+                    )
+                )
+            else:
+                kept_docs.append(doc)
+            continue
+        matched.add(key)
+        requested = normalized[key]
+        chunks = chunk_document(
+            doc.body_markdown,
+            max_chunk_tokens,
+            strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
+        )
+        if not requested:
+            doc.entry.status = "skipped"
+            doc.entry.token_estimate = 0
+            doc.entry.notes = _append_note(
+                doc.entry.notes,
+                "All chunks were deselected during chunk review; content omitted.",
+            )
+            warning = (
+                f"{doc.entry.doc_id} {doc.entry.source_path}: all chunks deselected; "
+                "document omitted from export."
+            )
+            warnings.append(warning)
+            emit("chunk_doc_omitted", f"  {warning}", {"doc_id": doc.entry.doc_id})
+            continue
+        valid = sorted({i for i in requested if 1 <= i <= len(chunks)})
+        invalid = sorted(set(requested) - set(valid))
+        if invalid:
+            warning = (
+                f"{doc.entry.doc_id} {doc.entry.source_path}: chunk indices out of "
+                f"range were ignored: {invalid} (document has {len(chunks)} chunks)"
+            )
+            warnings.append(warning)
+            emit("warning", f"  Warning: {warning}")
+        if not valid or len(valid) == len(chunks):
+            kept_docs.append(doc)
+            continue
+        trimmed_body = "\n\n".join(chunks[i - 1].text for i in valid)
+        trimmed_doc = make_converted_doc(doc.entry, trimmed_body)
+        trimmed_doc.entry.token_estimate = trimmed_doc.token_estimate
+        trimmed_doc.entry.notes = _append_note(
+            trimmed_doc.entry.notes,
+            f"Partial content: kept {len(valid)} of {len(chunks)} chunks via chunk review.",
+        )
+        emit(
+            "chunk_selection_applied",
+            f"  {doc.entry.doc_id}: kept {len(valid)} of {len(chunks)} chunks.",
+            {"doc_id": doc.entry.doc_id, "kept": len(valid), "total": len(chunks)},
+        )
+        kept_docs.append(trimmed_doc)
+
+    for key in sorted(set(normalized) - matched):
+        warning = f"Chunk selection ignored for unprocessed or excluded file: {key}"
+        warnings.append(warning)
+        emit("warning", f"  Warning: {warning}")
+    for pattern, hits in pattern_hits.items():
+        if hits == 0:
+            warning = f"Heading exclusion rule matched no chunks: {pattern!r}"
+            warnings.append(warning)
+            emit("warning", f"  Warning: {warning}")
+    return kept_docs
+
+
+def _apply_heading_rules(
+    doc: ConvertedDoc,
+    *,
+    patterns: Tuple[str, ...],
+    pattern_hits: Dict[str, int],
+    max_chunk_tokens: int,
+    chunk_strategy: str,
+    chunk_heading_level: int,
+    warnings: List[str],
+    emit: Callable[..., None],
+) -> List[ConvertedDoc]:
+    chunks = chunk_document(
+        doc.body_markdown,
+        max_chunk_tokens,
+        strategy=chunk_strategy,
+        heading_level=chunk_heading_level,
+    )
+    kept_chunks: List[Chunk] = []
+    excluded = 0
+    for chunk in chunks:
+        hits = match_heading_patterns(chunk.first_heading, patterns)
+        if hits:
+            excluded += 1
+            for pattern in hits:
+                pattern_hits[pattern] += 1
+        else:
+            kept_chunks.append(chunk)
+    if not excluded:
+        return [doc]
+    if not kept_chunks:
+        doc.entry.status = "skipped"
+        doc.entry.token_estimate = 0
+        doc.entry.notes = _append_note(
+            doc.entry.notes,
+            f"All {len(chunks)} chunks matched corpus heading rules; content omitted.",
+        )
+        warning = (
+            f"{doc.entry.doc_id} {doc.entry.source_path}: every chunk matched "
+            "the heading exclusion rules; document omitted from export."
+        )
+        warnings.append(warning)
+        emit("chunk_doc_omitted", f"  {warning}", {"doc_id": doc.entry.doc_id})
+        return []
+    trimmed_body = "\n\n".join(chunk.text for chunk in kept_chunks)
+    trimmed_doc = make_converted_doc(doc.entry, trimmed_body)
+    trimmed_doc.entry.token_estimate = trimmed_doc.token_estimate
+    trimmed_doc.entry.notes = _append_note(
+        trimmed_doc.entry.notes,
+        f"Excluded {excluded} of {len(chunks)} chunks via corpus heading rules.",
+    )
+    emit(
+        "chunk_rules_applied",
+        f"  {doc.entry.doc_id}: excluded {excluded} of {len(chunks)} chunks by heading rules.",
+        {"doc_id": doc.entry.doc_id, "excluded": excluded, "total": len(chunks)},
+    )
+    return [trimmed_doc]
+
+
+def _append_note(existing: str, note: str) -> str:
+    return f"{existing}; {note}" if existing else note
+
+
+@dataclass
+class DocumentChunkPreview:
+    """Chunks for one source file, converted in a throwaway workspace."""
+
+    status: str
+    notes: str
+    chunks: List[Chunk]
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(chunk.token_estimate for chunk in self.chunks)
+
+
+def preview_document_chunks(
+    scanned: ScannedFile,
+    source_root: Path,
+    max_chunk_tokens: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> DocumentChunkPreview:
+    """Convert one file in a temporary workspace and return its chunk preview.
+
+    Intended for UI adapters that let the user review and select chunks before
+    export. Asset/data copies made during conversion land in a temp directory
+    and are discarded. The placeholder doc id matches the length of real
+    ``DOC_xxxx`` ids so asset links don't shift chunk boundaries at export.
+    """
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        tmp_path = Path(tmp)
+        ctx = ReaderContext(
+            source_root=Path(source_root).expanduser().resolve(),
+            assets_dir=tmp_path / "assets",
+            data_dir=tmp_path / "data",
+        )
+        result = read_file(scanned, doc_id="DOC_0000", ctx=ctx)
+    if result.status != "ok":
+        return DocumentChunkPreview(status=result.status, notes=result.notes, chunks=[])
+    return DocumentChunkPreview(
+        status="ok",
+        notes=result.notes,
+        chunks=chunk_document(
+            result.markdown,
+            max_chunk_tokens,
+            strategy=chunk_strategy,
+            heading_level=chunk_heading_level,
+        ),
+    )
+
+
+def chunking_guidance(
+    previews: Mapping[str, DocumentChunkPreview],
+    max_chunk_tokens: int,
+    chunk_strategy: str,
+    target: str,
+) -> List[str]:
+    """Return plain-language tips for improving the current chunking setup.
+
+    Rules-based interpretation of a corpus chunking audit; the UI shows the
+    returned strings verbatim. An empty list means nothing stood out.
+    """
+    converted = [p for p in previews.values() if p.status == "ok"]
+    chunks = [chunk for preview in converted for chunk in preview.chunks]
+    tips: List[str] = []
+    if not chunks:
+        return tips
+
+    over_budget = sum(1 for c in chunks if c.token_estimate > max_chunk_tokens)
+    if over_budget:
+        tips.append(
+            f"{over_budget} chunk(s) exceed the {max_chunk_tokens:,}-token budget "
+            "because a single line (often a table or one-line paragraph) cannot "
+            "be split. Raise the chunk size to absorb them, or accept them "
+            "knowingly — for RAG they reduce retrieval precision."
+        )
+
+    heading_count = sum(
+        len(c.structure.headings) for c in chunks if c.structure is not None
+    )
+    if chunk_strategy != "headings" and heading_count >= 3 * len(converted):
+        tips.append(
+            f"The corpus is heading-rich ({heading_count} headings across "
+            f"{len(converted)} document(s)). The 'headings' strategy would align "
+            "chunk boundaries with the documents' own sections, which usually "
+            "retrieves and cites better than paragraph packing."
+        )
+
+    tiny_threshold = max(30, max_chunk_tokens // 10)
+    tiny = sum(1 for c in chunks if c.token_estimate < tiny_threshold)
+    if chunk_strategy == "headings" and tiny > len(chunks) // 4:
+        tips.append(
+            f"{tiny} of {len(chunks)} chunks are under {tiny_threshold} tokens — "
+            "typically small metadata or boilerplate sections. Deselect them "
+            "during review, split at a shallower heading level so they merge "
+            "into neighbors, or accept them if those fields matter for lookup."
+        )
+
+    single_chunk_docs = sum(1 for p in converted if len(p.chunks) == 1)
+    if single_chunk_docs > len(converted) // 2 and len(converted) > 1:
+        tips.append(
+            f"{single_chunk_docs} of {len(converted)} document(s) fit in a single "
+            "chunk, so chunking has no effect on them. That is fine for project "
+            "bundles; for RAG, a smaller chunk size gives retrieval more focused "
+            "passages to match."
+        )
+
+    if target == "rag" and max_chunk_tokens > 1500:
+        tips.append(
+            f"The chunk size ({max_chunk_tokens:,} tokens) is large for RAG. "
+            "Retrieval precision usually improves between roughly 300 and 800 "
+            "tokens per chunk, where each chunk holds one self-contained idea."
+        )
+
+    return tips
+
+
 def _normalize_extensions(values: Optional[Iterable[str]]) -> Tuple[str, ...]:
     if values is None:
         return ()
@@ -362,6 +706,28 @@ def _apply_included_files_filter(
     missing = sorted(wanted - found)
     warnings = [f"Included file was not found or was excluded: {path}" for path in missing]
     return filtered, warnings
+
+
+def _apply_excluded_files_filter(
+    files: List[ScannedFile],
+    exclude_files: Sequence[str],
+) -> Tuple[List[ScannedFile], List[str]]:
+    patterns = [p.strip() for p in exclude_files if p and p.strip()]
+    pattern_hits: Dict[str, int] = {pattern: 0 for pattern in patterns}
+    kept: List[ScannedFile] = []
+    for file in files:
+        hits = match_path_patterns(file.relative_path, patterns)
+        if hits:
+            for pattern in hits:
+                pattern_hits[pattern] += 1
+        else:
+            kept.append(file)
+    warnings = [
+        f"File exclusion pattern matched no files: {pattern!r}"
+        for pattern, hits in pattern_hits.items()
+        if hits == 0
+    ]
+    return kept, warnings
 
 
 def _included_key(value: Path | str, source_dir: Path) -> str:

@@ -110,8 +110,100 @@ Already shipped:
   target/mode, default token budget, resolved budget, max-token override,
   rough selected-token estimate, and projected bundle count. Override values
   are stored on the active `Profile` and passed to the export call.
+- Document chunk review in `streamlit_app.py`, backed by `packer/chunking.py`:
+  chunking was split out of `exporters.py` into `packer.chunking`
+  (`Chunk`, `chunk_markdown`, `chunk_document`); the RAG export now calls
+  `chunking.chunk_markdown` with identical output. The UI section sits
+  between file review and packaging settings: the user picks a chunk size
+  in tokens (default 800), previews how one included document splits into
+  chunks via `pipeline.preview_document_chunks(...)` (conversion happens in
+  a temporary workspace using a fixed-width `DOC_0000` placeholder id so
+  asset links don't shift chunk boundaries), and toggles per-chunk include
+  flags. Chunking behavior is transparent: every chunk carries a
+  `boundary_reason` (one of the `chunking.REASON_*` constants explaining why
+  its boundary was drawn) and a `ChunkStructure` summary (headings,
+  paragraph/list-item/table-row counts via
+  `chunking.analyze_markdown_structure`, skipping fenced code). The chunk
+  table shows heading, structure, and boundary columns, and a "Corpus
+  chunking audit" expander converts every included document at the current
+  chunk size to show corpus-wide totals, size distribution, a
+  boundary-reason breakdown, per-document chunk stats, and over-budget
+  chunk warnings — this is the V2 seed for V3 chunking-strategy rules.
+  Selections live in `st.session_state["chunk_review_selections"]`
+  as `{repr(scan_key): {relative_path: {"budget", "selected", "total"}}}`;
+  changing the chunk size clears selections made at a different size.
+  Export passes partial selections to
+  `run_packaging_job(chunk_selections=..., chunk_token_budget=...)`. The
+  pipeline re-chunks each selected document with the same deterministic
+  chunker, keeps only the selected 1-based chunk indices, rebuilds the
+  `ConvertedDoc`, and appends a "Partial content: kept m of n chunks" note
+  to the manifest entry. An explicit empty selection records the document
+  as `status=skipped` with a clear note; out-of-range indices and
+  selections for unprocessed files produce warnings without failing the
+  run. Documents without a chunk selection export in full. The CLI is
+  unchanged.
+- Chunking strategies and guidance (approved pull-forward of the V3
+  "chunking by heading" candidate; the richer strategies stay V3):
+  `chunking.STRATEGY_TOKENS` (V1 paragraph packing) and
+  `chunking.STRATEGY_HEADINGS` (`split_into_heading_sections` +
+  `chunk_markdown_by_headings_with_reasons`: a new chunk starts at every
+  heading of the chosen level or shallower, deeper headings stay inside
+  their section, oversize sections fall back to the token chunker, and
+  documents without qualifying headings fall back entirely).
+  `run_packaging_job` accepts `chunk_strategy` and `chunk_heading_level`;
+  chunk-selection re-chunking and `preview_document_chunks` honor them.
+  For `--target rag`, a provided `chunk_token_budget`/`chunk_strategy`
+  shapes `rag_ready/chunks.jsonl`; without them V1 output is byte-identical.
+  The UI's chunk review has a strategy selector and heading-level control,
+  clears selections made under different settings, and always passes the
+  current review settings to export so a UI RAG export matches the preview.
+  `pipeline.chunking_guidance(previews, budget, strategy, target)` turns a
+  corpus audit into plain-language tips (over-budget chunks, heading-rich
+  corpora, tiny boilerplate chunks, single-chunk documents, RAG chunk-size
+  range); the corpus audit expander renders them under "Chunking guidance".
+  Documented generated-file change: `00_RAG_EXPORT_NOTES.md` gained an
+  "Optimizing this export for retrieval" section with static RAG tips.
+- Corpus chunk rules: `Profile.chunk_exclude_headings` (active field) holds
+  case-insensitive glob patterns (e.g. `*_html`, `content_hash`) matched by
+  `chunking.match_heading_patterns` against each chunk's first heading.
+  `run_packaging_job(chunk_exclude_headings=...)` drops matching chunks
+  from every document that has no explicit `chunk_selections` entry — an
+  explicit per-document selection always wins. Trimmed documents get an
+  "Excluded m of n chunks via corpus heading rules" manifest note; a
+  document whose chunks all match is recorded as `status=skipped`; rules
+  that match nothing produce warnings without failing the run. In the UI
+  the rules live in a text input in chunk review (bound to the profile and
+  saved with it), rule-matched chunks default to deselected in per-document
+  previews, the corpus audit shows per-rule match counts and flags rules
+  that match nothing, and changing the rules clears selections like any
+  other chunk-setting change.
+- Profile-bound chunk settings: `Profile.chunk_token_budget` (None means
+  the pipeline default), `Profile.chunk_strategy`, and
+  `Profile.chunk_heading_level` are active fields emitted by
+  `to_packaging_kwargs`, validated against `chunking.STRATEGIES` and
+  heading levels 1–6. The chunk review widgets bind to them (loading a
+  profile refreshes the widgets; edits write back), and the export path
+  reads the profile, so a saved profile captures the full chunking
+  configuration — size, strategy, heading level, and exclusion rules. The
+  `RAG Ready Export` built-in template now sets `chunk_token_budget=800`,
+  so running it via `to_packaging_kwargs` produces retrieval-sized chunks
+  by default.
+- Profile-bound file review selection: `Profile.exclude_files` (active
+  field) holds case-insensitive glob patterns matched by
+  `scanner.match_path_patterns` against source-relative POSIX paths.
+  `run_packaging_job(exclude_files=...)` drops matching files after the
+  scan so they never appear in the manifest; patterns matching nothing
+  warn without failing. `included_files` is an explicit allowlist that
+  already encodes exclusions, so callers pass one or the other — the UI
+  export keeps passing `included_files`, while profile-driven runs use
+  `exclude_files`. In file review, deselecting a supported file writes
+  its exact path back to the profile and a fresh scan defaults files
+  matching the profile patterns to excluded (per-scan selections still
+  win); hand-written globs in profile JSON are honored at scan defaults
+  and profile-driven exports but the UI rewrites the list with exact
+  paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (16 fields total) + `save_profile`,
+  - `Profile` dataclass (21 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -120,10 +212,13 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the eight fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the thirteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
-    `include_extensions`, `exclude_dirs`). `profiles.INERT_FIELDS` lists
+    `include_extensions`, `exclude_dirs`, `exclude_files`,
+    `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
+    `chunk_heading_level`).
+    `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
     `spreadsheet_preview_rows`, `include_pdf_page_headers`,
@@ -135,23 +230,28 @@ Already shipped:
   - Forward-compat: unknown JSON keys are dropped on load, a
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
+- JSON file support in `packer/presets.py` and `packer/readers.py`:
+  `.json` classifies as file type `json` and `_read_json` renders objects
+  as Markdown with one heading per key (top level `##`, nested objects one
+  level deeper, scalar lists as bullets, explicit `(null)` / `(empty list)`
+  markers). Invalid JSON records a failed manifest entry without raising.
+  This makes structured records (e.g., scraped FEMA appeal JSON) flow
+  through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (2 cases) and `test_profiles.py` (26 cases) —
-  28 in total; passes with `python -m unittest discover -s tests` or
-  `pytest`.
+  `test_pipeline.py` (22 cases), `test_chunking.py` (26 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (31 cases) — 85 in
+  total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 
-- **profile UI extensions** — the project setup screen already exists;
-  follow-ups bind the per-screen forms to the same `Profile` so a saved
-  profile captures the user's full configuration including selection.
+- **profile UI extensions** — done: chunk settings, chunk rules, and the
+  file review selection (`exclude_files`) are all bound to the `Profile`,
+  so a saved profile captures the user's full configuration.
 
 Backend cleanup that still belongs in V2:
 
 - Fix `bundler.Bundle.filename` so numeric prefixes remain correct past 9
   bundles.
-- Split chunking out of `exporters.py` only if the UI needs chunk-preview or
-  strategy controls.
 - Replace any remaining direct pipeline printing with `ProgressEvent`
   callbacks while preserving CLI output.
 - Keep tests and CLI smoke commands passing after every milestone.
@@ -184,8 +284,9 @@ Candidate Version 3 features:
 - richer audit dashboard: duplicate candidates, stale sources, image-heavy
   docs, OCR-needed flags, broken links/assets, sensitive-data warnings, and
   source-quality notes;
-- chunking strategies by heading, page, token count, code symbol, legal issue,
-  repair procedure, disaster/applicant/project, or semantic topic;
+- chunking strategies beyond the shipped token/heading pair: by page, code
+  symbol, legal issue, repair procedure, disaster/applicant/project, or
+  semantic topic;
 - visual/manual enhancements: diagram index, image-reference preservation,
   optional visual companion export, and image handling controls;
 - source quality scoring and deduplication;
@@ -218,8 +319,8 @@ early.
 - Default to no comments. Only comment when WHY is non-obvious.
 - One responsibility per module. Keep `packer/` modules narrow:
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
-  `token_estimator`, `manifest`, `bundler`, `exporters`, `pipeline`,
-  `profiles`.
+  `token_estimator`, `manifest`, `bundler`, `chunking`, `exporters`,
+  `pipeline`, `profiles`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
@@ -308,6 +409,55 @@ Manual Streamlit inputs and expected outputs:
   Expected: the still-present excluded path remains excluded, the new
   supported file defaults included, unsupported files default excluded, and
   removed paths disappear from the selection state.
+- In `Document chunk review`, set `Chunk size (tokens)` to `50`, pick a
+  multi-paragraph document, click `Preview chunks`.
+  Expected: the chunk table lists every chunk with token estimates, first
+  heading, structure summary, and boundary reason; all chunks default
+  included and `Selected tokens` equals the document total.
+- Open `Corpus chunking audit`, click `Analyze corpus chunking`.
+  Expected: totals for documents/chunks/tokens, smallest/median/largest
+  chunk sizes, a boundary-reason breakdown table, a per-document table with
+  chunk counts and over-budget flags, a warning when any chunk exceeds
+  the budget (long unbreakable lines), and a `Chunking guidance` block with
+  plain-language tips (or a "nothing stood out" caption).
+- Switch `Chunking strategy` to `Heading sections (split at headings)`,
+  preview a document with headings (e.g., a converted JSON record).
+  Expected: one chunk per heading section with boundary reason
+  `section starts at a heading`; selections made under the token strategy
+  are cleared with an info message; `Split at heading level` appears.
+- With the heading strategy and `--target rag` semantics in mind, export a
+  RAG profile from the UI after setting chunk size/strategy.
+  Expected: the preview warns which chunk settings `rag_ready/chunks.jsonl`
+  will use, and the JSONL chunk boundaries match the previewed chunks.
+- Uncheck one chunk, then export.
+  Expected: the preview warns that one document has a partial chunk
+  selection, the bundle omits the deselected chunk's text, and the manifest
+  entry notes `Partial content: kept m of n chunks`.
+- Click `Exclude all chunks`, then export.
+  Expected: a warning that the document will be skipped; the manifest
+  records `status = skipped` with an "all chunks deselected" note and the
+  bundle omits the document entirely.
+- Change `Chunk size (tokens)` after making a selection.
+  Expected: selections made at the old size are cleared and an info message
+  reports how many were reset.
+- Enter `url, *_html` in `Corpus chunk rules`, preview a converted JSON
+  record with the heading strategy.
+  Expected: chunks whose first heading matches default to deselected with
+  an info message; the corpus audit lists per-rule match counts; export
+  trims matching chunks from documents that were never previewed and the
+  manifest notes `Excluded m of n chunks via corpus heading rules`; a rule
+  matching nothing produces a warning, and an explicit per-document
+  selection overrides the rules for that document.
+- Load the `RAG Ready Export` built-in, then scan.
+  Expected: `Chunk size (tokens)` shows `800` from the profile; changing
+  strategy/size/level updates the profile, and `Save profile` round-trips
+  the chunk settings so a reloaded profile restores them.
+- Exclude a supported file in file review, save the profile, load it
+  fresh, and scan again.
+  Expected: the profile JSON lists the path under `exclude_files`, the
+  fresh scan defaults that file to excluded while new files stay
+  included, and a profile-driven export (`to_packaging_kwargs`) omits the
+  file from the manifest entirely.
 
 After a run, inspect the newest folder under `.\test_output\`:
 
