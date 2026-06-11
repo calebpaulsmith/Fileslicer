@@ -10,12 +10,13 @@ from __future__ import annotations
 from typing import Dict
 
 # Targets supported by the tool.
-TARGETS = ("chatgpt", "claude", "generic", "rag")
+TARGETS = ("chatgpt", "claude", "generic", "rag", "cowork")
 
 # Modes supported by the tool.
 MODES = ("lean", "balanced", "full", "visual_manual")
 
-# Per-target / per-mode bundle token budgets.
+# Per-target / per-mode bundle token budgets. For "rag" and "cowork" these
+# are *per-chunk* budgets rather than per-bundle budgets.
 BUNDLE_TOKEN_DEFAULTS: Dict[str, Dict[str, int]] = {
     "chatgpt": {
         "lean": 60_000,
@@ -40,6 +41,12 @@ BUNDLE_TOKEN_DEFAULTS: Dict[str, Dict[str, int]] = {
         "balanced": 40_000,
         "full": 50_000,
         "visual_manual": 40_000,
+    },
+    "cowork": {
+        "lean": 1_500,
+        "balanced": 2_500,
+        "full": 4_000,
+        "visual_manual": 2_500,
     },
 }
 

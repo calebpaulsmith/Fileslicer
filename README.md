@@ -2,7 +2,8 @@
 
 A local Python command-line tool and Streamlit UI that turns a folder of mixed
 source files into upload-ready project context bundles for ChatGPT Projects,
-Claude Projects, generic LLM chats, or simple RAG workflows.
+Claude Projects, generic LLM chats, simple RAG workflows, or a local MCP
+server that exposes the bundle to Claude / Cowork as tools.
 
 The long-term goal is a **Project Context Packager**: a local app that helps
 choose the right packaging strategy for the LLM and task, not just a file
@@ -88,6 +89,12 @@ used by the profile API.
 7. Generates target-specific instruction files.
 8. For `--target rag`, writes `rag_ready/chunks.jsonl` and
    `rag_ready/source_map.json`.
+9. For `--target cowork`, additionally writes a self-contained `mcp_server/`
+   directory (FastMCP stdio server, FTS5-indexed SQLite database, and a
+   paste-ready config snippet) that exposes the bundle to Claude / Cowork
+   as MCP tools (`list_documents`, `get_document`, `search`, `get_chunk`,
+   `get_asset_path`). The server runs locally; you still register it with
+   your MCP-aware client by hand.
 
 ## Supported File Types
 
@@ -132,7 +139,7 @@ Arguments:
 | Argument | Description |
 | --- | --- |
 | `source_dir` | Folder of source files to scan recursively. |
-| `--target` | One of `chatgpt`, `claude`, `generic`, `rag`. |
+| `--target` | One of `chatgpt`, `claude`, `generic`, `rag`, `cowork`. |
 | `--mode` | One of `lean`, `balanced`, `full`, `visual_manual`. |
 | `--output` | Output directory. Default: `.\llm_project_exports`. |
 | `--max-bundle-tokens` | Optional override for the per-bundle token budget. |
@@ -147,6 +154,7 @@ python .\pack_project.py ".\manuals\transmission" --target claude --mode balance
 python .\pack_project.py ".\docs" --target chatgpt --mode lean --include-extensions .html,.pdf
 python .\pack_project.py ".\kb" --target rag --mode balanced
 python .\pack_project.py ".\big_corpus" --target generic --mode full --max-bundle-tokens 50000
+python .\pack_project.py ".\manuals" --target cowork --mode balanced
 ```
 
 The CLI and UI both use the shared backend:
@@ -167,14 +175,15 @@ result = run_packaging_job(
 `--target` selects the instruction file and output format. The RAG target
 creates JSONL chunks instead of Markdown bundles.
 
-`--mode` controls the default per-bundle token budget:
+`--mode` controls the default per-bundle token budget. For `rag` and `cowork`
+this budget is the per-chunk size, not the per-bundle size:
 
-| Target / Mode | chatgpt | claude | generic | rag |
-| --- | ---: | ---: | ---: | ---: |
-| `lean` | 60,000 | 80,000 | 40,000 | 25,000 |
-| `balanced` | 90,000 | 120,000 | 60,000 | 40,000 |
-| `full` | 120,000 | 160,000 | 90,000 | 50,000 |
-| `visual_manual` | 90,000 | 120,000 | 60,000 | 40,000 |
+| Target / Mode | chatgpt | claude | generic | rag | cowork |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `lean` | 60,000 | 80,000 | 40,000 | 25,000 | 1,500 |
+| `balanced` | 90,000 | 120,000 | 60,000 | 40,000 | 2,500 |
+| `full` | 120,000 | 160,000 | 90,000 | 50,000 | 4,000 |
+| `visual_manual` | 90,000 | 120,000 | 60,000 | 40,000 | 2,500 |
 
 These are packaging targets, not official platform context-window limits.
 Platform limits can change. Edit `packer/presets.py` if you want different
@@ -213,6 +222,28 @@ llm_project_exports/
       source_map.json
 ```
 
+For `cowork`:
+
+```text
+llm_project_exports/
+  PROJECT_NAME_cowork_MODE_TIMESTAMP/
+    00_COWORK_MCP_INSTRUCTIONS.md
+    01_SOURCE_MANIFEST.md
+    manifest.csv
+    manifest.json
+    assets/
+    data/
+    rag_ready/
+      chunks.jsonl
+      source_map.json
+    mcp_server/
+      server.py
+      index.sqlite
+      cowork_config.json
+      requirements.txt
+      README.md
+```
+
 The scanner skips common generated folders such as `.venv`, `node_modules`,
 `llm_project_exports`, `sample_output`, and `test_output`. If the output
 folder is inside the source folder, it is skipped automatically during scan.
@@ -240,6 +271,17 @@ RAG export:
 1. Use `manifest.json` or `manifest.csv` as the source index.
 2. Use `rag_ready/chunks.jsonl` as the chunk file.
 3. Use `rag_ready/source_map.json` to map documents to chunks.
+
+Cowork / MCP export:
+
+1. Install the runtime dep inside the bundle:
+   `pip install -r mcp_server\requirements.txt`.
+2. Open `mcp_server/cowork_config.json` and merge its `mcpServers` entry
+   into your MCP-aware client's config (for example `~/.claude/mcp.json` or
+   the Claude Desktop config), then restart the client.
+3. The server registers as `fileslicer_<project>` and exposes
+   `list_documents`, `get_document`, `search`, `get_chunk`, and
+   `get_asset_path` to the client.
 
 No upload step is automated.
 

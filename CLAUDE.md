@@ -39,8 +39,16 @@ or remote hosting.
 - Greedy token-budget bundling into `02_BUNDLE_*.md` files.
 - Three-format manifest: `01_SOURCE_MANIFEST.md`, `manifest.csv`, `manifest.json`.
 - Target-specific instruction files (`00_CHATGPT_*`, `00_CLAUDE_*`,
-  `00_GENERIC_*`, `00_RAG_EXPORT_NOTES.md`).
+  `00_GENERIC_*`, `00_RAG_EXPORT_NOTES.md`, `00_COWORK_MCP_INSTRUCTIONS.md`).
 - For `--target rag`: `rag_ready/chunks.jsonl` + `rag_ready/source_map.json`.
+- For `--target cowork`: everything in the `rag` export plus a self-contained
+  `mcp_server/` directory (FastMCP stdio `server.py`, FTS5-indexed
+  `index.sqlite`, paste-ready `cowork_config.json`, `requirements.txt`,
+  `README.md`) that exposes the bundle to Claude/Cowork as MCP tools
+  (`list_documents`, `get_document`, `search`, `get_chunk`,
+  `get_asset_path`). The server runs locally over stdio; the user still
+  registers it with their MCP-aware client manually — the tool never
+  performs the registration itself.
 - Per-file failure isolation; unsupported files appear in the manifest as
   `status=skipped`.
 
@@ -260,6 +268,7 @@ python pack_project.py .\sample_input --target chatgpt --mode balanced --output 
 python pack_project.py .\sample_input --target claude  --mode lean     --output .\test_output
 python pack_project.py .\sample_input --target generic --mode full     --output .\test_output --max-bundle-tokens 5000
 python pack_project.py .\sample_input --target rag     --mode balanced --output .\test_output
+python pack_project.py .\sample_input --target cowork  --mode balanced --output .\test_output
 
 # CLI behaviour
 python pack_project.py                                              # prints help + clear error, exit code 2
@@ -347,6 +356,34 @@ For `--target rag`:
       chunks.jsonl
       source_map.json
 ```
+
+For `--target cowork`:
+
+```
+<output>/
+  PROJECT_NAME_cowork_MODE_TIMESTAMP/
+    00_COWORK_MCP_INSTRUCTIONS.md
+    01_SOURCE_MANIFEST.md
+    manifest.csv
+    manifest.json
+    assets/
+    data/
+    rag_ready/
+      chunks.jsonl
+      source_map.json
+    mcp_server/
+      server.py
+      index.sqlite
+      cowork_config.json
+      requirements.txt
+      README.md
+```
+
+The cowork target reuses the rag chunking path and adds the `mcp_server/`
+directory next to the standard outputs. The per-bundle token budget under
+this target is interpreted as a per-chunk budget, scaled smaller than the
+rag defaults so each FTS5 hit fits comfortably inside a single MCP tool
+response.
 
 Rules for output:
 

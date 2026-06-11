@@ -1,14 +1,16 @@
-"""Generate platform-specific instruction files and the RAG export."""
+"""Generate platform-specific instruction files and the RAG / Cowork exports."""
 
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
 from .bundler import Bundle, ConvertedDoc
 from .manifest import Manifest
+from .markdown_utils import safe_filename
 from .token_estimator import estimate_tokens, estimator_backend
 
 
@@ -48,6 +50,8 @@ def write_instructions(target: str, output_dir: Path, ctx: InstructionContext) -
         return _write_generic(output_dir, ctx)
     if target == "rag":
         return _write_rag_notes(output_dir, ctx)
+    if target == "cowork":
+        return _write_cowork_notes(output_dir, ctx)
     raise ValueError(f"Unknown target: {target!r}")
 
 
@@ -196,6 +200,62 @@ def _write_generic(output_dir: Path, ctx: InstructionContext) -> Path:
         "",
     ]
     return _write(output_dir / "00_GENERIC_LLM_INSTRUCTIONS.md", lines)
+
+
+def _write_cowork_notes(output_dir: Path, ctx: InstructionContext) -> Path:
+    safe_project = safe_filename(ctx.project_name) or "project"
+    server_id = f"fileslicer_{safe_project}"
+    lines = [
+        f"# Cowork MCP Bundle — {ctx.project_name}",
+        "",
+        f"- **Target:** {ctx.target}",
+        f"- **Mode:** {ctx.mode}",
+        f"- **Documents:** {ctx.total_documents}",
+        f"- **Estimated total tokens:** {ctx.total_tokens:,}",
+        f"- **Per-chunk token budget:** {ctx.max_bundle_tokens:,}",
+        f"- **Token estimator backend:** {estimator_backend()}",
+        "",
+        "## What this export contains",
+        "",
+        "- `01_SOURCE_MANIFEST.md` / `manifest.csv` / `manifest.json` — the canonical document list.",
+        "- `rag_ready/chunks.jsonl` + `rag_ready/source_map.json` — the chunked corpus the server reads from.",
+        "- `assets/` and `data/` — copied images and original CSV/XLSX files.",
+        "- `mcp_server/` — a self-contained local MCP server that exposes this bundle as tools.",
+        "",
+        "## How to use this bundle with Claude / Cowork",
+        "",
+        "1. Install the MCP runtime inside the bundle (one-time per Python environment):",
+        "",
+        "   ```powershell",
+        f"   pip install -r mcp_server\\requirements.txt",
+        "   ```",
+        "",
+        "2. Register the server with your MCP-aware client. The bundle ships a paste-ready",
+        "   snippet at `mcp_server/cowork_config.json`. Merge its `mcpServers` entry into your",
+        "   client's MCP config (for example `~/.claude/mcp.json` or the Claude Desktop config),",
+        "   then restart the client.",
+        "",
+        "3. Confirm the server is connected. Claude / Cowork will list the tools provided by",
+        f"   `{server_id}` and let you call `search`, `get_document`, `list_documents`,",
+        "   `get_chunk`, and `get_asset_path` directly from chat.",
+        "",
+        "## Tools the server exposes",
+        "",
+        "- `list_documents(limit=50, status=None)` — manifest rows (doc_id, source_file, status, token estimate).",
+        "- `get_document(doc_id)` — identity header + full text for one document.",
+        "- `search(query, limit=10)` — SQLite FTS5 keyword search across all chunks, ranked by BM25.",
+        "- `get_chunk(chunk_id)` — chunk text plus the previous/next chunk ids in the same document.",
+        "- `get_asset_path(doc_id, name)` — absolute local path to a copied image or data file.",
+        "",
+        "## Notes",
+        "",
+        _DISCLAIMER,
+        "",
+        "This tool does not upload anything to Claude for you. The MCP server runs locally on",
+        "your machine and only responds to the MCP client you have explicitly registered it with.",
+        "",
+    ]
+    return _write(output_dir / "00_COWORK_MCP_INSTRUCTIONS.md", lines)
 
 
 def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
@@ -393,3 +453,361 @@ def assign_bundles_to_manifest(manifest: Manifest, bundles: List[Bundle]) -> Non
             entry = by_id.get(doc.entry.doc_id)
             if entry is not None:
                 entry.output_bundle = bundle.filename
+
+
+# ---------------------------------------------------------------------------
+# Cowork / MCP export
+# ---------------------------------------------------------------------------
+
+
+def write_cowork_bundle(
+    export_dir: Path,
+    project_name: str,
+    rag_dir: Path,
+) -> Path:
+    """Build the ``mcp_server/`` directory next to the RAG export.
+
+    Reads ``rag_dir / chunks.jsonl`` and writes an FTS5-indexed SQLite database
+    plus a self-contained FastMCP stdio server script that serves the bundle
+    as MCP tools. Returns the path to the generated ``mcp_server/`` directory.
+    """
+    mcp_dir = export_dir / "mcp_server"
+    mcp_dir.mkdir(parents=True, exist_ok=True)
+    index_path = mcp_dir / "index.sqlite"
+    server_path = mcp_dir / "server.py"
+    config_path = mcp_dir / "cowork_config.json"
+    requirements_path = mcp_dir / "requirements.txt"
+    readme_path = mcp_dir / "README.md"
+    chunks_path = rag_dir / "chunks.jsonl"
+
+    _build_fts_index(index_path, chunks_path)
+
+    safe_project = safe_filename(project_name) or "project"
+    server_id = f"fileslicer_{safe_project}"
+    server_path.write_text(_render_server_script(project_name, server_id), encoding="utf-8")
+    requirements_path.write_text("mcp[cli]>=1.0\n", encoding="utf-8")
+    config_path.write_text(_render_cowork_config(server_id, server_path), encoding="utf-8")
+    readme_path.write_text(_render_server_readme(project_name, server_id), encoding="utf-8")
+
+    return mcp_dir
+
+
+def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
+    if index_path.exists():
+        index_path.unlink()
+    conn = sqlite3.connect(str(index_path))
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE chunks (
+                chunk_id      TEXT PRIMARY KEY,
+                doc_id        TEXT NOT NULL,
+                source_file   TEXT,
+                source_path   TEXT,
+                token_estimate INTEGER,
+                ordinal       INTEGER,
+                text          TEXT
+            );
+            CREATE INDEX idx_chunks_doc_id ON chunks(doc_id, ordinal);
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                chunk_id UNINDEXED,
+                doc_id UNINDEXED,
+                source_file,
+                text,
+                tokenize = 'unicode61 remove_diacritics 2'
+            );
+            """
+        )
+        if chunks_path.exists():
+            with chunks_path.open("r", encoding="utf-8") as f:
+                doc_ordinals: dict[str, int] = {}
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    doc_id = payload.get("doc_id", "")
+                    ordinal = doc_ordinals.get(doc_id, 0)
+                    doc_ordinals[doc_id] = ordinal + 1
+                    conn.execute(
+                        "INSERT INTO chunks (chunk_id, doc_id, source_file, source_path,"
+                        " token_estimate, ordinal, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            payload.get("chunk_id", ""),
+                            doc_id,
+                            payload.get("source_file", ""),
+                            payload.get("source_path", ""),
+                            int(payload.get("token_estimate") or 0),
+                            ordinal,
+                            payload.get("text", ""),
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO chunks_fts (chunk_id, doc_id, source_file, text)"
+                        " VALUES (?, ?, ?, ?)",
+                        (
+                            payload.get("chunk_id", ""),
+                            doc_id,
+                            payload.get("source_file", ""),
+                            payload.get("text", ""),
+                        ),
+                    )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _render_cowork_config(server_id: str, server_path: Path) -> str:
+    payload = {
+        "mcpServers": {
+            server_id: {
+                "command": "python",
+                "args": [str(server_path.resolve())],
+            }
+        }
+    }
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def _render_server_readme(project_name: str, server_id: str) -> str:
+    return (
+        f"# MCP server for {project_name}\n\n"
+        "This directory is a self-contained MCP server generated by\n"
+        "`llm_project_packer --target cowork`. It exposes the bundle in this\n"
+        "export folder to any MCP-aware client (Claude Desktop, Cowork, etc.).\n\n"
+        "## One-time setup\n\n"
+        "```powershell\n"
+        "pip install -r requirements.txt\n"
+        "```\n\n"
+        "## Register the server\n\n"
+        f"Open `cowork_config.json` and merge the `mcpServers.{server_id}` entry into\n"
+        "your client's MCP config file (for example `~/.claude/mcp.json` or the\n"
+        "Claude Desktop config), then restart the client.\n\n"
+        "## Tools provided\n\n"
+        "- `list_documents` — list manifest rows.\n"
+        "- `get_document` — return one document's full text.\n"
+        "- `search` — SQLite FTS5 keyword search across chunks, ranked by BM25.\n"
+        "- `get_chunk` — return one chunk plus the previous/next chunk ids.\n"
+        "- `get_asset_path` — return the absolute local path of an asset or data file.\n\n"
+        "Moving or renaming this folder is fine; the server resolves paths at runtime.\n"
+        "If you move it, regenerate `cowork_config.json` or update the `args` path inside\n"
+        "your MCP config to point at the new `server.py` location.\n"
+    )
+
+
+def _render_server_script(project_name: str, server_id: str) -> str:
+    safe_project = project_name.replace('"', '\\"')
+    return f'''"""MCP stdio server for the {safe_project!s} llm_project_packer bundle.
+
+This file is generated by llm_project_packer's --target cowork export. It is
+self-contained: it reads its sibling `index.sqlite` and the parent bundle's
+`manifest.json`, `rag_ready/chunks.jsonl`, `assets/`, and `data/` directories.
+You can move the whole export folder; the server resolves paths relative to
+this script at runtime.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError as exc:  # pragma: no cover - import-time guidance only
+    raise SystemExit(
+        "The 'mcp' package is required to run this server. Install it with:\\n"
+        "    pip install -r " + str(Path(__file__).resolve().parent / "requirements.txt")
+    ) from exc
+
+
+SERVER_DIR = Path(__file__).resolve().parent
+BUNDLE_DIR = SERVER_DIR.parent
+INDEX_PATH = SERVER_DIR / "index.sqlite"
+MANIFEST_PATH = BUNDLE_DIR / "manifest.json"
+CHUNKS_PATH = BUNDLE_DIR / "rag_ready" / "chunks.jsonl"
+SOURCE_MAP_PATH = BUNDLE_DIR / "rag_ready" / "source_map.json"
+ASSETS_DIR = BUNDLE_DIR / "assets"
+DATA_DIR = BUNDLE_DIR / "data"
+
+PROJECT_NAME = {project_name!r}
+SERVER_ID = {server_id!r}
+
+mcp = FastMCP(SERVER_ID)
+
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(INDEX_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _load_manifest() -> List[Dict[str, Any]]:
+    if not MANIFEST_PATH.exists():
+        return []
+    try:
+        payload = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    entries = payload.get("entries") if isinstance(payload, dict) else payload
+    return list(entries or [])
+
+
+def _load_source_map() -> Dict[str, Any]:
+    if not SOURCE_MAP_PATH.exists():
+        return {{}}
+    try:
+        return json.loads(SOURCE_MAP_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {{}}
+
+
+def _escape_fts_query(query: str) -> str:
+    cleaned = query.replace('"', " ").strip()
+    if not cleaned:
+        return cleaned
+    tokens = [token for token in cleaned.split() if token]
+    return " ".join(f'"{{token}}"' for token in tokens)
+
+
+@mcp.tool()
+def list_documents(limit: int = 50, status: Optional[str] = None) -> Dict[str, Any]:
+    """List documents recorded in the bundle manifest.
+
+    Args:
+        limit: Maximum rows to return (default 50; pass 0 for no cap).
+        status: Optional manifest status filter (``ok``, ``skipped``, ``failed``).
+    """
+    rows = _load_manifest()
+    if status:
+        rows = [r for r in rows if r.get("status") == status]
+    if limit and limit > 0:
+        rows = rows[:limit]
+    return {{"project_name": PROJECT_NAME, "count": len(rows), "documents": rows}}
+
+
+@mcp.tool()
+def get_document(doc_id: str) -> Dict[str, Any]:
+    """Return the full text of one document by ``DOC_xxxx`` id, reconstructed from its chunks."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chunk_id, source_file, source_path, text, token_estimate, ordinal"
+            " FROM chunks WHERE doc_id = ? ORDER BY ordinal ASC",
+            (doc_id,),
+        ).fetchall()
+    if not rows:
+        return {{"doc_id": doc_id, "found": False, "text": ""}}
+    text = "\\n\\n".join(r["text"] for r in rows if r["text"])
+    return {{
+        "doc_id": doc_id,
+        "found": True,
+        "source_file": rows[0]["source_file"],
+        "source_path": rows[0]["source_path"],
+        "chunk_count": len(rows),
+        "token_estimate": sum(int(r["token_estimate"] or 0) for r in rows),
+        "text": text,
+    }}
+
+
+@mcp.tool()
+def search(query: str, limit: int = 10) -> Dict[str, Any]:
+    """Run a BM25-ranked SQLite FTS5 keyword search across all chunks.
+
+    Args:
+        query: Free-text query. Quoted tokens are matched literally.
+        limit: Max hits to return (default 10).
+    """
+    fts_query = _escape_fts_query(query)
+    if not fts_query:
+        return {{"query": query, "hits": []}}
+    capped_limit = max(1, min(int(limit or 10), 100))
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT chunks_fts.chunk_id AS chunk_id, chunks_fts.doc_id AS doc_id,"
+            " chunks_fts.source_file AS source_file,"
+            " snippet(chunks_fts, 3, '[[', ']]', '...', 24) AS snippet,"
+            " bm25(chunks_fts) AS score"
+            " FROM chunks_fts WHERE chunks_fts MATCH ?"
+            " ORDER BY score ASC LIMIT ?",
+            (fts_query, capped_limit),
+        ).fetchall()
+    hits = [
+        {{
+            "chunk_id": r["chunk_id"],
+            "doc_id": r["doc_id"],
+            "source_file": r["source_file"],
+            "snippet": r["snippet"],
+            "score": float(r["score"]) if r["score"] is not None else None,
+        }}
+        for r in rows
+    ]
+    return {{"query": query, "hit_count": len(hits), "hits": hits}}
+
+
+@mcp.tool()
+def get_chunk(chunk_id: str) -> Dict[str, Any]:
+    """Return one chunk's text plus the previous/next chunk ids in the same document."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT chunk_id, doc_id, source_file, source_path, text, token_estimate, ordinal"
+            " FROM chunks WHERE chunk_id = ?",
+            (chunk_id,),
+        ).fetchone()
+        if row is None:
+            return {{"chunk_id": chunk_id, "found": False}}
+        neighbors = conn.execute(
+            "SELECT chunk_id, ordinal FROM chunks WHERE doc_id = ? ORDER BY ordinal ASC",
+            (row["doc_id"],),
+        ).fetchall()
+    ordinal = row["ordinal"]
+    prev_id = next((n["chunk_id"] for n in neighbors if n["ordinal"] == ordinal - 1), None)
+    next_id = next((n["chunk_id"] for n in neighbors if n["ordinal"] == ordinal + 1), None)
+    return {{
+        "chunk_id": row["chunk_id"],
+        "doc_id": row["doc_id"],
+        "source_file": row["source_file"],
+        "source_path": row["source_path"],
+        "token_estimate": int(row["token_estimate"] or 0),
+        "ordinal": ordinal,
+        "previous_chunk_id": prev_id,
+        "next_chunk_id": next_id,
+        "text": row["text"],
+        "found": True,
+    }}
+
+
+@mcp.tool()
+def get_asset_path(doc_id: str, name: str) -> Dict[str, Any]:
+    """Resolve an asset or data file copied for ``doc_id`` to its absolute local path.
+
+    The MCP client (not this server) decides how to use the path. Returns
+    ``found=False`` if no matching file exists.
+    """
+    candidates: List[Path] = []
+    asset_root = ASSETS_DIR / doc_id
+    if asset_root.exists():
+        candidates.append(asset_root / name)
+    if DATA_DIR.exists():
+        candidates.extend(p for p in DATA_DIR.glob(f"{{doc_id}}_*") if p.name.endswith(name) or p.name == name)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            if resolved.exists() and BUNDLE_DIR in resolved.parents:
+                return {{
+                    "doc_id": doc_id,
+                    "name": name,
+                    "found": True,
+                    "path": str(resolved),
+                }}
+        except OSError:
+            continue
+    return {{"doc_id": doc_id, "name": name, "found": False, "path": None}}
+
+
+if __name__ == "__main__":
+    mcp.run()
+'''

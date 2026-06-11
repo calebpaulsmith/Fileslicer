@@ -363,7 +363,7 @@ def _rough_bundle_count(
     target: str,
     max_bundle_tokens: int,
 ) -> int | None:
-    if target == "rag":
+    if target in ("rag", "cowork"):
         return None
     supported = [scanned for scanned in files if _is_supported(scanned)]
     if not supported:
@@ -507,6 +507,13 @@ def _manual_upload_instructions(target: str, result: PackResult) -> List[str]:
             "Use rag_ready/chunks.jsonl as the chunk file for your local/API retrieval workflow.",
             "Use rag_ready/source_map.json to map source documents to chunk IDs.",
             "This app does not create embeddings or upload data anywhere.",
+        ]
+    if target == "cowork":
+        return [
+            "Install the runtime dep: pip install -r mcp_server\\requirements.txt.",
+            "Open mcp_server/cowork_config.json and merge its mcpServers entry into your MCP-aware client's config (for example ~/.claude/mcp.json or the Claude Desktop config).",
+            "Restart the client; the server registers as fileslicer_<project> and exposes search, list_documents, get_document, get_chunk, and get_asset_path tools.",
+            f"See {instruction_name} for the full setup walkthrough. This app does not register the server for you.",
         ]
     return [
         "Upload or paste 01_SOURCE_MANIFEST.md first so the model has the source index.",

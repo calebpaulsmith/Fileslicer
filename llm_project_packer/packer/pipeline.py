@@ -18,6 +18,7 @@ from .config import PackerConfig
 from .exporters import (
     InstructionContext,
     assign_bundles_to_manifest,
+    write_cowork_bundle,
     write_instructions,
     write_rag_export,
 )
@@ -181,7 +182,8 @@ def run_packaging_config(
 
     bundle_paths: List[Path] = []
     bundle_filenames: List[str] = []
-    if cfg.target != "rag":
+    chunked_targets = {"rag", "cowork"}
+    if cfg.target not in chunked_targets:
         emit("blank", "")
         emit("bundle_start", "Bundling documents...")
         bundles = split_into_bundles(converted_docs, cfg.max_bundle_tokens)
@@ -206,7 +208,10 @@ def run_packaging_config(
         assign_bundles_to_manifest(manifest, bundles)
     else:
         emit("blank", "")
-        emit("rag_start", "Target is 'rag'; skipping Markdown bundling.")
+        emit(
+            "rag_start",
+            f"Target is {cfg.target!r}; chunking documents for retrieval.",
+        )
         rag_dir = export_dir / "rag_ready"
         write_rag_export(
             rag_dir,
@@ -214,6 +219,17 @@ def run_packaging_config(
             max_chunk_tokens=cfg.max_bundle_tokens,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
+        if cfg.target == "cowork":
+            mcp_dir = write_cowork_bundle(
+                export_dir=export_dir,
+                project_name=cfg.project_name,
+                rag_dir=rag_dir,
+            )
+            emit(
+                "cowork_written",
+                f"  Wrote MCP server bundle to {mcp_dir}.",
+                {"path": mcp_dir},
+            )
 
     emit("blank", "")
     emit("manifest_start", "Writing manifest...")

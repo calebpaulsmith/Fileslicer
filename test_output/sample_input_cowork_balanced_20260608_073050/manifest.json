@@ -1,0 +1,72 @@
+{
+  "project_name": "sample_input",
+  "target": "cowork",
+  "mode": "balanced",
+  "entries": [
+    {
+      "doc_id": "DOC_0001",
+      "source_file": "data.csv",
+      "source_path": "data.csv",
+      "original_extension": ".csv",
+      "file_type": "csv",
+      "status": "ok",
+      "token_estimate": 131,
+      "char_count": 297,
+      "word_count": 61,
+      "notes": "",
+      "output_bundle": ""
+    },
+    {
+      "doc_id": "DOC_0002",
+      "source_file": "intro.html",
+      "source_path": "manuals/pages/intro.html",
+      "original_extension": ".html",
+      "file_type": "html",
+      "status": "ok",
+      "token_estimate": 97,
+      "char_count": 235,
+      "word_count": 44,
+      "notes": "Missing image asset: ../../missing/diagram.png",
+      "output_bundle": ""
+    },
+    {
+      "doc_id": "DOC_0003",
+      "source_file": "icon.png",
+      "source_path": "notes/icon.png",
+      "original_extension": ".png",
+      "file_type": "image",
+      "status": "ok",
+      "token_estimate": 62,
+      "char_count": 111,
+      "word_count": 13,
+      "notes": "image copied; no OCR in v1",
+      "output_bundle": ""
+    },
+    {
+      "doc_id": "DOC_0004",
+      "source_file": "quick.txt",
+      "source_path": "notes/quick.txt",
+      "original_extension": ".txt",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 55,
+      "char_count": 93,
+      "word_count": 16,
+      "notes": "",
+      "output_bundle": ""
+    },
+    {
+      "doc_id": "DOC_0005",
+      "source_file": "README.md",
+      "source_path": "notes/README.md",
+      "original_extension": ".md",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 78,
+      "char_count": 244,
+      "word_count": 39,
+      "notes": "",
+      "output_bundle": ""
+    }
+  ]
+}
