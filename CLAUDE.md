@@ -169,8 +169,19 @@ Already shipped:
   previews, the corpus audit shows per-rule match counts and flags rules
   that match nothing, and changing the rules clears selections like any
   other chunk-setting change.
+- Profile-bound chunk settings: `Profile.chunk_token_budget` (None means
+  the pipeline default), `Profile.chunk_strategy`, and
+  `Profile.chunk_heading_level` are active fields emitted by
+  `to_packaging_kwargs`, validated against `chunking.STRATEGIES` and
+  heading levels 1–6. The chunk review widgets bind to them (loading a
+  profile refreshes the widgets; edits write back), and the export path
+  reads the profile, so a saved profile captures the full chunking
+  configuration — size, strategy, heading level, and exclusion rules. The
+  `RAG Ready Export` built-in template now sets `chunk_token_budget=800`,
+  so running it via `to_packaging_kwargs` produces retrieval-sized chunks
+  by default.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (17 fields total) + `save_profile`,
+  - `Profile` dataclass (20 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -179,10 +190,11 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the nine fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the twelve fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
-    `include_extensions`, `exclude_dirs`, `chunk_exclude_headings`).
+    `include_extensions`, `exclude_dirs`, `chunk_exclude_headings`,
+    `chunk_token_budget`, `chunk_strategy`, `chunk_heading_level`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -203,15 +215,15 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (18 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), and `test_profiles.py` (28 cases) — 78 in
+  `test_pipeline.py` (19 cases), `test_chunking.py` (26 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (30 cases) — 81 in
   total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 
-- **profile UI extensions** — the project setup screen already exists;
-  follow-ups bind the per-screen forms to the same `Profile` so a saved
-  profile captures the user's full configuration including selection.
+- **profile UI extensions** — chunk settings and rules are now bound to
+  the `Profile`; the remaining gap is capturing the file review selection
+  so a saved profile records which files were included or excluded.
 
 Backend cleanup that still belongs in V2:
 
@@ -412,6 +424,10 @@ Manual Streamlit inputs and expected outputs:
   manifest notes `Excluded m of n chunks via corpus heading rules`; a rule
   matching nothing produces a warning, and an explicit per-document
   selection overrides the rules for that document.
+- Load the `RAG Ready Export` built-in, then scan.
+  Expected: `Chunk size (tokens)` shows `800` from the profile; changing
+  strategy/size/level updates the profile, and `Save profile` round-trips
+  the chunk settings so a reloaded profile restores them.
 
 After a run, inspect the newest folder under `.\test_output\`:
 

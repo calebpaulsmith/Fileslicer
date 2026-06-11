@@ -387,6 +387,48 @@ class ChunkRuleTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class ProfileDrivenExportTests(unittest.TestCase):
+    def make_tempdir(self) -> Path:
+        TEST_TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        path = TEST_TMP_ROOT / f"case_{uuid.uuid4().hex}"
+        path.mkdir()
+        return path
+
+    def test_profile_chunk_settings_drive_rag_export(self) -> None:
+        from packer.profiles import Profile
+
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "doc.md").write_text(
+                "## One\n\nFirst section.\n\n## Two\n\nSecond section.\n",
+                encoding="utf-8",
+            )
+
+            profile = Profile(
+                profile_name="RAG with headings",
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_heading_level=2,
+            )
+            kwargs = profile.to_packaging_kwargs(
+                source_dir=source, output_dir=output
+            )
+            result = run_packaging_job(**kwargs)
+
+            chunks_path = result.export_dir / "rag_ready" / "chunks.jsonl"
+            lines = chunks_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 2)
+            self.assertIn("## One", lines[0])
+            self.assertIn("## Two", lines[1])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
 class ChunkingGuidanceTests(unittest.TestCase):
     @staticmethod
     def preview(token_sizes: list[int], headings_per_chunk: int = 0) -> DocumentChunkPreview:
