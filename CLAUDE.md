@@ -159,10 +159,17 @@ Already shipped:
   - Forward-compat: unknown JSON keys are dropped on load, a
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
+- JSON file support in `packer/presets.py` and `packer/readers.py`:
+  `.json` classifies as file type `json` and `_read_json` renders objects
+  as Markdown with one heading per key (top level `##`, nested objects one
+  level deeper, scalar lists as bullets, explicit `(null)` / `(empty list)`
+  markers). Invalid JSON records a failed manifest entry without raising.
+  This makes structured records (e.g., scraped FEMA appeal JSON) flow
+  through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (6 cases), `test_chunking.py` (15 cases), and
-  `test_profiles.py` (26 cases) — 47 in total; passes with
-  `python -m unittest discover -s tests` or `pytest`.
+  `test_pipeline.py` (6 cases), `test_chunking.py` (15 cases),
+  `test_readers.py` (6 cases), and `test_profiles.py` (26 cases) — 53 in
+  total; passes with `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
 

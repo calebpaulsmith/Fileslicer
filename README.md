@@ -116,6 +116,9 @@ Spreadsheets and data:
 
 - `.csv`
 - `.xlsx`
+- `.json` (structured records render as Markdown with one heading per
+  field, so chunk review and heading-aware tooling see the record's own
+  structure)
 
 Images:
 

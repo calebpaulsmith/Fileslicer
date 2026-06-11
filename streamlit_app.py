@@ -63,7 +63,17 @@ SESSION_KEY_CHUNK_REVISIONS = "chunk_review_revisions"
 SESSION_KEY_CORPUS_AUDIT = "corpus_chunk_audit"
 SESSION_KEY_LAST_EXPORT_RESULT = "last_export_result"
 BUNDLE_SEPARATOR_OPTIONS = ("comment", "rule", "blank")
-FILE_TYPE_ORDER = ("text", "html", "pdf", "docx", "csv", "xlsx", "image", "unsupported")
+FILE_TYPE_ORDER = (
+    "text",
+    "html",
+    "pdf",
+    "docx",
+    "csv",
+    "xlsx",
+    "json",
+    "image",
+    "unsupported",
+)
 DEFAULT_CHUNK_REVIEW_TOKENS = 800
 
 
