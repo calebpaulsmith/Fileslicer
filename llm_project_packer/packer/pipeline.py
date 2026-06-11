@@ -32,7 +32,7 @@ from .exporters import (
 from .manifest import Manifest, ManifestEntry
 from .markdown_utils import doc_id_for_index, safe_filename
 from .readers import ReaderContext, read_file
-from .scanner import ScannedFile, scan_directory
+from .scanner import ScannedFile, match_path_patterns, scan_directory
 from .token_estimator import estimate_tokens, estimator_backend
 
 
@@ -75,6 +75,7 @@ def run_packaging_job(
     include_extensions: Optional[Iterable[str]] = None,
     exclude_dirs: Optional[Iterable[str]] = None,
     included_files: Optional[Iterable[Path | str]] = None,
+    exclude_files: Optional[Sequence[str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -105,6 +106,12 @@ def run_packaging_job(
     heading. Matching chunks are dropped from every document that has no
     explicit entry in ``chunk_selections`` — an explicit per-document
     selection always wins over the rules.
+
+    ``exclude_files`` holds glob patterns matched against source-relative
+    paths (see ``scanner.match_path_patterns``); matching files are dropped
+    after the scan and never appear in the manifest. ``included_files`` is
+    an explicit allowlist that already encodes any exclusions, so callers
+    pass one or the other, not both.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -129,6 +136,7 @@ def run_packaging_job(
     return run_packaging_config(
         cfg,
         included_files=included_file_list,
+        exclude_files=exclude_files,
         chunk_selections=chunk_selections,
         chunk_token_budget=chunk_token_budget,
         chunk_strategy=chunk_strategy,
@@ -142,6 +150,7 @@ def run_packaging_config(
     cfg: PackerConfig,
     *,
     included_files: Optional[Iterable[Path | str]] = None,
+    exclude_files: Optional[Sequence[str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -189,6 +198,11 @@ def run_packaging_config(
     warnings.extend(include_warnings)
     for warning in include_warnings:
         emit("warning", f"  Warning: {warning}")
+    if exclude_files:
+        files, exclude_warnings = _apply_excluded_files_filter(files, exclude_files)
+        warnings.extend(exclude_warnings)
+        for warning in exclude_warnings:
+            emit("warning", f"  Warning: {warning}")
 
     emit("scan_done", f"  Found {len(files)} files to record/process.", {"count": len(files)})
     if not files:
@@ -676,6 +690,28 @@ def _apply_included_files_filter(
     missing = sorted(wanted - found)
     warnings = [f"Included file was not found or was excluded: {path}" for path in missing]
     return filtered, warnings
+
+
+def _apply_excluded_files_filter(
+    files: List[ScannedFile],
+    exclude_files: Sequence[str],
+) -> Tuple[List[ScannedFile], List[str]]:
+    patterns = [p.strip() for p in exclude_files if p and p.strip()]
+    pattern_hits: Dict[str, int] = {pattern: 0 for pattern in patterns}
+    kept: List[ScannedFile] = []
+    for file in files:
+        hits = match_path_patterns(file.relative_path, patterns)
+        if hits:
+            for pattern in hits:
+                pattern_hits[pattern] += 1
+        else:
+            kept.append(file)
+    warnings = [
+        f"File exclusion pattern matched no files: {pattern!r}"
+        for pattern, hits in pattern_hits.items()
+        if hits == 0
+    ]
+    return kept, warnings
 
 
 def _included_key(value: Path | str, source_dir: Path) -> str:

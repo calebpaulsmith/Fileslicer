@@ -108,7 +108,11 @@ class ProfileDataclassTests(ProfilesTestCase):
             "max_bundle_tokens",
             "include_extensions",
             "exclude_dirs",
+            "exclude_files",
             "chunk_exclude_headings",
+            "chunk_token_budget",
+            "chunk_strategy",
+            "chunk_heading_level",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -139,8 +143,58 @@ class ProfileDataclassTests(ProfilesTestCase):
         kwargs = profile.to_packaging_kwargs()
         self.assertIsNone(kwargs["include_extensions"])
         self.assertIsNone(kwargs["exclude_dirs"])
+        self.assertIsNone(kwargs["exclude_files"])
         self.assertIsNone(kwargs["chunk_exclude_headings"])
         self.assertIsNone(kwargs["max_bundle_tokens"])
+
+    def test_exclude_files_round_trip_and_kwargs(self) -> None:
+        root = self.make_tempdir()
+        try:
+            profile = Profile(
+                profile_name="Exclude Files Sample",
+                default_source_folder="C:/src",
+                exclude_files=["notes/draft.txt", "*.tmp"],
+            )
+            save_profile(profile, profiles_dir=root)
+            loaded = load_profile("Exclude Files Sample", profiles_dir=root)
+            self.assertEqual(loaded.exclude_files, ["notes/draft.txt", "*.tmp"])
+            kwargs = loaded.to_packaging_kwargs()
+            self.assertEqual(kwargs["exclude_files"], ["notes/draft.txt", "*.tmp"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+        self.assertIsNone(kwargs["chunk_token_budget"])
+        self.assertEqual(kwargs["chunk_strategy"], "tokens")
+        self.assertEqual(kwargs["chunk_heading_level"], 2)
+
+    def test_chunk_settings_round_trip_and_kwargs(self) -> None:
+        root = self.make_tempdir()
+        try:
+            profile = Profile(
+                profile_name="Chunk Settings Sample",
+                default_source_folder="C:/src",
+                chunk_token_budget=600,
+                chunk_strategy="headings",
+                chunk_heading_level=3,
+            )
+            save_profile(profile, profiles_dir=root)
+            loaded = load_profile("Chunk Settings Sample", profiles_dir=root)
+            self.assertEqual(loaded.chunk_token_budget, 600)
+            self.assertEqual(loaded.chunk_strategy, "headings")
+            self.assertEqual(loaded.chunk_heading_level, 3)
+            kwargs = loaded.to_packaging_kwargs()
+            self.assertEqual(kwargs["chunk_token_budget"], 600)
+            self.assertEqual(kwargs["chunk_strategy"], "headings")
+            self.assertEqual(kwargs["chunk_heading_level"], 3)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_validate_rejects_bad_chunk_settings(self) -> None:
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_token_budget=0).validate()
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_strategy="semantic").validate()
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_heading_level=0).validate()
 
     def test_chunk_exclude_headings_round_trip_and_kwargs(self) -> None:
         root = self.make_tempdir()

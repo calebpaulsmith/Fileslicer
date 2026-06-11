@@ -89,7 +89,11 @@ UI flow:
    export.
 
 Profiles are saved to `~/.llm_project_packer/profiles/`, the same location
-used by the profile API.
+used by the profile API. A profile captures the full chunking configuration
+— chunk size, strategy, heading level, and corpus chunk rules — plus the
+file review selection (excluded files re-apply on the next scan), alongside
+the packaging settings. The `RAG Ready Export` built-in defaults to
+retrieval-sized 800-token chunks.
 
 ## What It Does
 

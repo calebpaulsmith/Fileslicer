@@ -54,7 +54,7 @@ from packer.profiles import (  # noqa: E402
     load_profile,
     save_profile,
 )
-from packer.scanner import ScannedFile, scan_directory  # noqa: E402
+from packer.scanner import ScannedFile, match_path_patterns, scan_directory  # noqa: E402
 
 
 PAGE_TITLE = "llm_project_packer"
@@ -255,16 +255,29 @@ def _selection_store_key(
     return repr(key)
 
 
+def _default_file_included(
+    scanned: ScannedFile,
+    exclude_patterns: Sequence[str],
+) -> bool:
+    if not _is_supported(scanned):
+        return False
+    return not match_path_patterns(scanned.relative_path, exclude_patterns)
+
+
 def _reconcile_file_selections(
     key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
     files: Sequence[ScannedFile],
+    exclude_patterns: Sequence[str] = (),
 ) -> Dict[str, bool]:
     store = st.session_state[SESSION_KEY_FILE_SELECTIONS]
     store_key = _selection_store_key(key)
     previous = store.get(store_key, {})
     current = {
         str(scanned.relative_path): bool(
-            previous.get(str(scanned.relative_path), _is_supported(scanned))
+            previous.get(
+                str(scanned.relative_path),
+                _default_file_included(scanned, exclude_patterns),
+            )
         )
         for scanned in files
     }
@@ -892,7 +905,13 @@ def _render_file_review(
 ) -> None:
     st.subheader("File review")
 
-    selections = _reconcile_file_selections(key, files)
+    profile = _profile()
+    selections = _reconcile_file_selections(key, files, profile.exclude_files)
+    st.caption(
+        "Excluded supported files are saved to the profile as `exclude_files`, "
+        "so a saved profile re-applies this selection on the next scan and on "
+        "profile-driven exports."
+    )
     included_count = sum(1 for included in selections.values() if included)
     supported_count = sum(1 for scanned in files if _is_supported(scanned))
     unsupported_count = len(files) - supported_count
@@ -1027,6 +1046,13 @@ def _render_file_review(
         if relative_path:
             selections[relative_path] = bool(record.get("include", False))
 
+    profile.exclude_files = sorted(
+        str(scanned.relative_path)
+        for scanned in files
+        if _is_supported(scanned)
+        and not selections.get(str(scanned.relative_path), True)
+    )
+
     _render_chunk_review(key, files, selections)
     _render_packaging_settings(key, files, selections)
     _render_preview_and_export(key, files, selections)
@@ -1070,19 +1096,20 @@ def _export_chunk_selections(
     """Return partial chunk selections for included files plus the chunk
     settings (budget, strategy, heading level) they were made under.
 
-    When the chunk review widgets have been rendered, their current values
-    are returned even without partial selections so a RAG export's
-    ``chunks.jsonl`` matches what the user previewed."""
+    The chunk settings come from the active profile (the review widgets bind
+    to it), so a RAG export's ``chunks.jsonl`` matches what the user
+    previewed even without partial selections."""
     store = _chunk_store(key)
     included = set(_included_paths(files, selections))
     partial: Dict[str, List[int]] = {}
-    widget_prefix = f"chunks_{_scan_key_id(key)}"
-    widget_budget = st.session_state.get(f"{widget_prefix}_budget")
-    budget: int | None = int(widget_budget) if widget_budget is not None else None
-    strategy = str(st.session_state.get(f"{widget_prefix}_strategy", STRATEGY_TOKENS))
-    heading_level = int(
-        st.session_state.get(f"{widget_prefix}_heading_level", DEFAULT_HEADING_LEVEL)
+    profile = _profile()
+    budget: int | None = (
+        int(profile.chunk_token_budget)
+        if profile.chunk_token_budget is not None
+        else None
     )
+    strategy = profile.chunk_strategy
+    heading_level = int(profile.chunk_heading_level)
     for relative_path, state in store.items():
         if relative_path not in included:
             continue
@@ -1146,52 +1173,65 @@ def _render_chunk_review(
         return
 
     widget_prefix = f"chunks_{_scan_key_id(key)}"
+    strategy_options = list(CHUNK_STRATEGY_LABELS)
+    level_options = [1, 2, 3, 4]
     col_strategy, col_level, col_budget = st.columns([2, 1, 1])
     with col_strategy:
         strategy = st.selectbox(
             "Chunking strategy",
-            options=list(CHUNK_STRATEGY_LABELS),
+            options=strategy_options,
+            index=_safe_index(strategy_options, profile.chunk_strategy),
             format_func=lambda value: CHUNK_STRATEGY_LABELS[value],
-            key=f"{widget_prefix}_strategy",
+            key=_key("chunk_strategy"),
             help=(
                 "Token budget packs paragraphs greedily up to the chunk size. "
                 "Heading sections never merge content across headings — each "
                 "section becomes its own chunk (split further only if it "
                 "exceeds the chunk size). Use heading sections when documents "
-                "have meaningful structure, e.g. converted records or manuals."
+                "have meaningful structure, e.g. converted records or manuals. "
+                "Saved with the profile."
             ),
         )
+        profile.chunk_strategy = strategy
     with col_level:
         if strategy == STRATEGY_HEADINGS:
+            level_index = (
+                level_options.index(int(profile.chunk_heading_level))
+                if int(profile.chunk_heading_level) in level_options
+                else DEFAULT_HEADING_LEVEL - 1
+            )
             heading_level = int(
                 st.selectbox(
                     "Split at heading level",
-                    options=[1, 2, 3, 4],
-                    index=DEFAULT_HEADING_LEVEL - 1,
-                    key=f"{widget_prefix}_heading_level",
+                    options=level_options,
+                    index=level_index,
+                    key=_key("chunk_heading_level"),
                     help=(
                         "Sections start at headings of this level or shallower; "
-                        "deeper headings stay inside their section."
+                        "deeper headings stay inside their section. Saved with "
+                        "the profile."
                     ),
                 )
             )
+            profile.chunk_heading_level = heading_level
         else:
-            heading_level = DEFAULT_HEADING_LEVEL
+            heading_level = int(profile.chunk_heading_level)
     with col_budget:
         budget = int(
             st.number_input(
                 "Chunk size (tokens)",
                 min_value=50,
-                value=DEFAULT_CHUNK_REVIEW_TOKENS,
+                value=int(profile.chunk_token_budget or DEFAULT_CHUNK_REVIEW_TOKENS),
                 step=50,
-                key=f"{widget_prefix}_budget",
+                key=_key("chunk_token_budget"),
                 help=(
                     "Smaller chunks give finer selection control. Changing any "
                     "chunk setting re-chunks documents and clears selections "
-                    "made under different settings."
+                    "made under different settings. Saved with the profile."
                 ),
             )
         )
+        profile.chunk_token_budget = budget
 
     stale_paths = [
         relative_path

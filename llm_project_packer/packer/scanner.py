@@ -7,6 +7,7 @@ filters, and yields stable, sorted file records.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
@@ -20,8 +21,26 @@ class ScannedFile:
     absolute_path: Path
     relative_path: Path
     extension: str  # lowercase, includes leading dot
-    file_type: str  # text/html/pdf/docx/csv/xlsx/image/unsupported
+    file_type: str  # text/html/pdf/docx/csv/xlsx/json/image/unsupported
     size_bytes: int
+
+
+def match_path_patterns(
+    relative_path: Path | str,
+    patterns: Sequence[str],
+) -> Tuple[str, ...]:
+    """Return the patterns that match a source-relative path.
+
+    Matching is case-insensitive and glob-style against the POSIX form of
+    the path (e.g. ``notes/draft.txt``), so exact paths, ``*.tmp``, and
+    ``drafts/*`` all work. Blank patterns never match.
+    """
+    candidate = Path(relative_path).as_posix().lower()
+    return tuple(
+        pattern
+        for pattern in patterns
+        if pattern and pattern.strip() and fnmatchcase(candidate, pattern.strip().lower())
+    )
 
 
 def _is_excluded_dir(name: str, excluded: Sequence[str]) -> bool:
