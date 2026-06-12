@@ -56,6 +56,7 @@ ACTIVE_FIELDS: Sequence[str] = (
     "chunk_min_tokens",
     "chunk_overlap_tokens",
     "chunk_split_sentences",
+    "chunk_fence_aware",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -96,6 +97,7 @@ class Profile:
     chunk_min_tokens: int = 0
     chunk_overlap_tokens: int = 0
     chunk_split_sentences: bool = False
+    chunk_fence_aware: bool = False
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -211,6 +213,7 @@ class Profile:
             "chunk_min_tokens": int(self.chunk_min_tokens),
             "chunk_overlap_tokens": int(self.chunk_overlap_tokens),
             "chunk_split_sentences": bool(self.chunk_split_sentences),
+            "chunk_fence_aware": bool(self.chunk_fence_aware),
         }
         return kwargs
 

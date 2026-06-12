@@ -10,6 +10,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 from packer.chunking import (  # noqa: E402
     REASON_BUDGET_REACHED,
     REASON_END_OF_DOCUMENT,
+    REASON_FENCE_KEPT,
     REASON_HEADING_SECTION,
     REASON_MERGED_SMALL,
     REASON_OVERSIZE_SPLIT,
@@ -27,6 +28,7 @@ from packer.chunking import (  # noqa: E402
     match_heading_patterns,
     merge_undersized_chunks,
     split_into_heading_sections,
+    split_paragraphs_fence_aware,
 )
 from packer.token_estimator import estimate_tokens  # noqa: E402
 
@@ -339,6 +341,77 @@ class SentenceSplitTests(unittest.TestCase):
         self.assertTrue(
             any(reason == REASON_SENTENCE_SPLIT for _, reason in pairs)
         )
+
+
+def _balanced_fences(text: str) -> bool:
+    markers = sum(1 for line in text.split("\n") if line.strip().startswith("```"))
+    return markers % 2 == 0
+
+
+class FenceAwareTests(unittest.TestCase):
+    FENCED_DOC = (
+        f"{_paragraph('intro', 15)}\n\n"
+        "```python\n"
+        f"{_paragraph('code', 15)}\n"
+        "\n"
+        f"{_paragraph('more', 15)}\n"
+        "```\n\n"
+        f"{_paragraph('outro', 15)}"
+    )
+
+    def test_default_chunker_splits_inside_fence(self) -> None:
+        chunks = chunk_markdown(self.FENCED_DOC, 30)
+        self.assertTrue(
+            any(not _balanced_fences(chunk) for chunk in chunks),
+            "expected the fence-blind default to break the code block",
+        )
+
+    def test_fence_aware_never_splits_inside_fence(self) -> None:
+        chunks = chunk_markdown(self.FENCED_DOC, 30, fence_aware=True)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertTrue(_balanced_fences(chunk), f"broken fence in: {chunk!r}")
+
+    def test_split_paragraphs_keeps_fence_with_blank_line_whole(self) -> None:
+        paragraphs = split_paragraphs_fence_aware(self.FENCED_DOC)
+        self.assertEqual(len(paragraphs), 3)
+        self.assertTrue(paragraphs[1].startswith("```python"))
+        self.assertTrue(paragraphs[1].endswith("```"))
+
+    def test_plain_text_chunks_identically_either_way(self) -> None:
+        text = "\n\n".join([_paragraph("alpha"), _paragraph("bravo"), _paragraph("charlie")])
+        self.assertEqual(
+            chunk_markdown_with_reasons(text, 50),
+            chunk_markdown_with_reasons(text, 50, fence_aware=True),
+        )
+
+    def test_oversize_fence_is_kept_whole_with_reason(self) -> None:
+        fence = "```\n" + "\n".join([_paragraph("big", 12)] * 6) + "\n```"
+        pairs = chunk_markdown_with_reasons(fence, 20, fence_aware=True)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0], (fence, REASON_FENCE_KEPT))
+
+    def test_oversize_fence_is_not_sentence_split(self) -> None:
+        fence = "```\n" + " ".join(["A sentence here."] * 20) + "\n```"
+        pairs = chunk_markdown_with_reasons(
+            fence, 15, split_sentences=True, fence_aware=True
+        )
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1], REASON_FENCE_KEPT)
+
+    def test_chunk_document_honors_fence_aware(self) -> None:
+        broken = chunk_document(self.FENCED_DOC, 30)
+        self.assertTrue(any(not _balanced_fences(c.text) for c in broken))
+        kept = chunk_document(self.FENCED_DOC, 30, fence_aware=True)
+        self.assertTrue(all(_balanced_fences(c.text) for c in kept))
+
+    def test_heading_strategy_passes_fence_aware_into_sections(self) -> None:
+        text = f"## Code\n\n{self.FENCED_DOC}"
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, 30, heading_level=2, fence_aware=True
+        )
+        for chunk_text, _ in pairs:
+            self.assertTrue(_balanced_fences(chunk_text))
 
 
 class ApplyChunkOverlapTests(unittest.TestCase):

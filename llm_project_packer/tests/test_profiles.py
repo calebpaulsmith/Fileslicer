@@ -116,6 +116,7 @@ class ProfileDataclassTests(ProfilesTestCase):
             "chunk_min_tokens",
             "chunk_overlap_tokens",
             "chunk_split_sentences",
+            "chunk_fence_aware",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -134,11 +135,13 @@ class ProfileDataclassTests(ProfilesTestCase):
             chunk_min_tokens=40,
             chunk_overlap_tokens=80,
             chunk_split_sentences=True,
+            chunk_fence_aware=True,
         )
         kwargs = profile.to_packaging_kwargs()
         self.assertEqual(kwargs["chunk_min_tokens"], 40)
         self.assertEqual(kwargs["chunk_overlap_tokens"], 80)
         self.assertIs(kwargs["chunk_split_sentences"], True)
+        self.assertIs(kwargs["chunk_fence_aware"], True)
 
     def test_to_packaging_kwargs_uses_overrides(self) -> None:
         profile = Profile(

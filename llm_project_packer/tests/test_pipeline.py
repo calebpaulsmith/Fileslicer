@@ -445,6 +445,58 @@ class PipelineTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_rag_export_keeps_code_fences_whole_when_fence_aware(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            filler = " ".join(["filler"] * 25)
+            code = " ".join(["code"] * 20)
+            (source / "doc.md").write_text(
+                f"{filler}\n\n```python\n{code}\n\n{code}\n```\n\n{filler}\n",
+                encoding="utf-8",
+            )
+
+            def fence_marker_counts(result) -> list:
+                lines = (
+                    (result.export_dir / "rag_ready" / "chunks.jsonl")
+                    .read_text(encoding="utf-8")
+                    .strip()
+                    .splitlines()
+                )
+                return [
+                    sum(
+                        1
+                        for text_line in json.loads(line)["text"].split("\n")
+                        if text_line.strip().startswith("```")
+                    )
+                    for line in lines
+                ]
+
+            broken = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=30,
+            )
+            self.assertTrue(any(count % 2 for count in fence_marker_counts(broken)))
+
+            kept = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=30,
+                chunk_fence_aware=True,
+            )
+            counts = fence_marker_counts(kept)
+            self.assertGreater(len(counts), 1)
+            self.assertTrue(all(count % 2 == 0 for count in counts))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_chunk_selection_uses_merged_boundaries(self) -> None:
         root = self.make_tempdir()
         try:

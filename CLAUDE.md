@@ -234,6 +234,26 @@ Already shipped:
   Documented generated-file change: the `00_RAG_EXPORT_NOTES.md`
   chunk-splitting paragraph lists sentence splitting as configurable
   instead of suggesting pre-processing.
+- Fence-aware chunking for codebases (profile-bound active field
+  `Profile.chunk_fence_aware`, default off = byte-identical): the token
+  chunker normally splits at every blank line, so a fenced ``` code block
+  containing a blank line can be cut mid-fence, leaving chunks with
+  unbalanced fence markers. With the toggle on,
+  `chunking.split_paragraphs_fence_aware` keeps each fence atomic when
+  splitting paragraphs, `_split_oversize_paragraph` treats a fence as one
+  unbreakable unit, and a fence larger than the chunk budget is emitted
+  whole with boundary reason `chunking.REASON_FENCE_KEPT` (it shows up in
+  the audit's over-budget warning rather than being broken; sentence
+  splitting never applies inside a fence). Intended for codebases and
+  technical Markdown — converted PDFs and office documents rarely contain
+  fences, so it stays off by default and the UI checkbox ("Keep code
+  blocks whole (for codebases)") says so. Like the other
+  boundary-affecting settings it applies everywhere documents are chunked,
+  changing it clears chunk selections, it flows through
+  `run_packaging_job(chunk_fence_aware=...)`, and it re-runs from the CLI
+  via `--profile`. One documented opt-in nuance: whitespace-only lines
+  count as blank when fence-aware splitting is on, where plain
+  `split("\n\n")` does not.
 - Profile-bound file review selection: `Profile.exclude_files` (active
   field) holds case-insensitive glob patterns matched by
   `scanner.match_path_patterns` against source-relative POSIX paths.
@@ -249,7 +269,7 @@ Already shipped:
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (24 fields total) + `save_profile`,
+  - `Profile` dataclass (25 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -258,13 +278,13 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the sixteen fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the seventeen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
     `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
-    `chunk_split_sentences`).
+    `chunk_split_sentences`, `chunk_fence_aware`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -299,10 +319,10 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (31 cases), `test_chunking.py` (45 cases),
+  `test_pipeline.py` (32 cases), `test_chunking.py` (53 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (33 cases),
   `test_cli.py` (11 cases), and
-  `test_bundler.py` (4 cases) — 130 in total; passes with
+  `test_bundler.py` (4 cases) — 139 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -539,6 +559,14 @@ Manual Streamlit inputs and expected outputs:
   budget with boundary reason `oversize line split at sentence
   boundaries`; the corpus audit's over-budget warning clears; changing
   the checkbox clears selections like a chunk-size change.
+- Tick `Keep code blocks whole (for codebases)`, preview a Markdown file
+  containing a fenced code block with a blank line inside it, using a
+  chunk size small enough to force a split near the fence.
+  Expected: with the toggle off, some chunk contains an odd number of
+  ``` markers (the fence is broken); with it on, every chunk's fences are
+  balanced, a fence larger than the chunk size appears whole with
+  boundary reason `oversize fenced code block kept whole`, and changing
+  the toggle clears selections like a chunk-size change.
 - In `Corpus chunking audit` with the heading strategy, open the
   `Heading browser` after analyzing.
   Expected: one row per distinct chunk heading with chunk/token/document

@@ -1,0 +1,12 @@
+{
+  "DOC_0001": {
+    "source_file": "doc.md",
+    "source_path": "doc.md",
+    "chunk_ids": [
+      "DOC_0001__c001",
+      "DOC_0001__c002",
+      "DOC_0001__c003"
+    ],
+    "token_estimate": 165
+  }
+}

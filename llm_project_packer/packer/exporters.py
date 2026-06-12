@@ -354,15 +354,16 @@ def write_rag_export(
     min_chunk_tokens: int = 0,
     overlap_tokens: int = 0,
     split_sentences: bool = False,
+    fence_aware: bool = False,
 ) -> None:
     """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``.
 
     The defaults preserve V1 output exactly. Callers that ran chunk review
     can pass ``chunk_strategy``/``heading_level``/``min_chunk_tokens``/
-    ``split_sentences`` so the JSONL chunk boundaries match what the user
-    previewed. ``overlap_tokens > 0`` additionally prefixes each chunk with
-    the tail of its predecessor (boundaries and chunk count are unchanged;
-    only the exported text gains the overlap).
+    ``split_sentences``/``fence_aware`` so the JSONL chunk boundaries match
+    what the user previewed. ``overlap_tokens > 0`` additionally prefixes
+    each chunk with the tail of its predecessor (boundaries and chunk count
+    are unchanged; only the exported text gains the overlap).
     """
     rag_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = rag_dir / "chunks.jsonl"
@@ -394,10 +395,12 @@ def write_rag_export(
 
             if chunk_strategy == STRATEGY_HEADINGS:
                 pairs = chunk_markdown_by_headings_with_reasons(
-                    text, max_chunk_tokens, heading_level, split_sentences
+                    text, max_chunk_tokens, heading_level, split_sentences, fence_aware
                 )
             else:
-                pairs = chunk_markdown_with_reasons(text, max_chunk_tokens, split_sentences)
+                pairs = chunk_markdown_with_reasons(
+                    text, max_chunk_tokens, split_sentences, fence_aware
+                )
             pairs = merge_undersized_chunks(pairs, min_chunk_tokens, max_chunk_tokens)
             chunk_texts = apply_chunk_overlap(
                 [chunk_text for chunk_text, _ in pairs], overlap_tokens
