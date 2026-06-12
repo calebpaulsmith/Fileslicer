@@ -62,6 +62,14 @@ Notes since the original plan was written:
 - Packaging settings shipped in `streamlit_app.py`: after scan/review it
   shows target/mode, default budget, resolved budget, a max-token override,
   rough selected-token estimate, and projected bundle count.
+- Milestone 3's optional CLI flag shipped (later than the rest of the
+  milestone): `pack_project.py --profile <name>` loads a saved profile or a
+  built-in template and runs it through
+  `Profile.to_packaging_kwargs(...)` → `run_packaging_job(...)`, so a
+  profile saved in the UI (including the chunking configuration) re-runs
+  from the CLI. Explicit flags override profile values; `--profiles-dir`
+  redirects storage; behavior without `--profile` is unchanged. Covered by
+  `tests/test_cli.py`.
 - The "Advanced options" expander already binds every inert profile field
   (`include_assets`, `copy_data_files`, `spreadsheet_preview_rows`,
   `include_pdf_page_headers`, `include_source_metadata`,

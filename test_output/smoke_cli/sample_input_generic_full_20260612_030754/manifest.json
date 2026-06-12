@@ -1,0 +1,72 @@
+{
+  "project_name": "sample_input",
+  "target": "generic",
+  "mode": "full",
+  "entries": [
+    {
+      "doc_id": "DOC_0001",
+      "source_file": "data.csv",
+      "source_path": "data.csv",
+      "original_extension": ".csv",
+      "file_type": "csv",
+      "status": "ok",
+      "token_estimate": 99,
+      "char_count": 298,
+      "word_count": 61,
+      "notes": "",
+      "output_bundle": "02_BUNDLE_001.md"
+    },
+    {
+      "doc_id": "DOC_0002",
+      "source_file": "intro.html",
+      "source_path": "manuals/pages/intro.html",
+      "original_extension": ".html",
+      "file_type": "html",
+      "status": "failed",
+      "token_estimate": 0,
+      "char_count": 0,
+      "word_count": 0,
+      "notes": "Reader crashed: No module named 'bs4' | ModuleNotFoundError: No module named 'bs4'",
+      "output_bundle": ""
+    },
+    {
+      "doc_id": "DOC_0003",
+      "source_file": "icon.png",
+      "source_path": "notes/icon.png",
+      "original_extension": ".png",
+      "file_type": "image",
+      "status": "ok",
+      "token_estimate": 53,
+      "char_count": 111,
+      "word_count": 13,
+      "notes": "image copied; no OCR in v1",
+      "output_bundle": "02_BUNDLE_001.md"
+    },
+    {
+      "doc_id": "DOC_0004",
+      "source_file": "quick.txt",
+      "source_path": "notes/quick.txt",
+      "original_extension": ".txt",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 49,
+      "char_count": 93,
+      "word_count": 16,
+      "notes": "",
+      "output_bundle": "02_BUNDLE_001.md"
+    },
+    {
+      "doc_id": "DOC_0005",
+      "source_file": "README.md",
+      "source_path": "notes/README.md",
+      "original_extension": ".md",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 87,
+      "char_count": 244,
+      "word_count": 39,
+      "notes": "",
+      "output_bundle": "02_BUNDLE_001.md"
+    }
+  ]
+}

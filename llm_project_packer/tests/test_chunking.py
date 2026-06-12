@@ -11,19 +11,23 @@ from packer.chunking import (  # noqa: E402
     REASON_BUDGET_REACHED,
     REASON_END_OF_DOCUMENT,
     REASON_HEADING_SECTION,
+    REASON_MERGED_SMALL,
     REASON_OVERSIZE_SPLIT,
     REASON_PREAMBLE,
     REASON_WHOLE_DOCUMENT,
     STRATEGY_HEADINGS,
     Chunk,
     analyze_markdown_structure,
+    apply_chunk_overlap,
     chunk_document,
     chunk_markdown,
     chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
     match_heading_patterns,
+    merge_undersized_chunks,
     split_into_heading_sections,
 )
+from packer.token_estimator import estimate_tokens  # noqa: E402
 
 
 def _paragraph(word: str, repeats: int = 30) -> str:
@@ -232,6 +236,79 @@ class StructureAnalysisTests(unittest.TestCase):
         structure = analyze_markdown_structure(text)
         self.assertEqual(structure.headings, ())
         self.assertEqual(structure.list_item_count, 0)
+
+
+class MergeUndersizedChunksTests(unittest.TestCase):
+    def test_zero_min_tokens_returns_input_unchanged(self) -> None:
+        pairs = [("a", REASON_BUDGET_REACHED), ("b", REASON_END_OF_DOCUMENT)]
+        self.assertEqual(merge_undersized_chunks(pairs, 0, 1000), pairs)
+
+    def test_tiny_chunk_merges_into_previous(self) -> None:
+        big = _paragraph("alpha")
+        pairs = [(big, REASON_BUDGET_REACHED), ("tiny", REASON_END_OF_DOCUMENT)]
+        merged = merge_undersized_chunks(pairs, 10, 1000)
+        self.assertEqual(merged, [(f"{big}\n\ntiny", REASON_MERGED_SMALL)])
+
+    def test_tiny_first_chunk_merges_into_next(self) -> None:
+        big = _paragraph("bravo")
+        pairs = [("tiny", REASON_HEADING_SECTION), (big, REASON_HEADING_SECTION)]
+        merged = merge_undersized_chunks(pairs, 10, 1000)
+        self.assertEqual(merged, [(f"tiny\n\n{big}", REASON_MERGED_SMALL)])
+
+    def test_chain_of_tiny_chunks_collapses(self) -> None:
+        pairs = [
+            ("a a a", REASON_HEADING_SECTION),
+            ("b b b", REASON_HEADING_SECTION),
+            ("c c c", REASON_HEADING_SECTION),
+        ]
+        merged = merge_undersized_chunks(pairs, 50, 1000)
+        self.assertEqual(merged, [("a a a\n\nb b b\n\nc c c", REASON_MERGED_SMALL)])
+
+    def test_budget_blocks_merging(self) -> None:
+        big = _paragraph("charlie")
+        pairs = [(big, REASON_BUDGET_REACHED), ("tiny", REASON_END_OF_DOCUMENT)]
+        merged = merge_undersized_chunks(pairs, 10, estimate_tokens(big))
+        self.assertEqual(merged, pairs)
+
+    def test_chunk_document_honors_min_tokens(self) -> None:
+        text = f"## A\n\ntiny\n\n## B\n\n{_paragraph('delta')}"
+        without = chunk_document(text, 1000, strategy=STRATEGY_HEADINGS, heading_level=2)
+        self.assertEqual(len(without), 2)
+        with_min = chunk_document(
+            text, 1000, strategy=STRATEGY_HEADINGS, heading_level=2, min_tokens=20
+        )
+        self.assertEqual(len(with_min), 1)
+        self.assertEqual(with_min[0].boundary_reason, REASON_MERGED_SMALL)
+        self.assertIn("tiny", with_min[0].text)
+        self.assertIn("delta", with_min[0].text)
+
+
+class ApplyChunkOverlapTests(unittest.TestCase):
+    def test_zero_overlap_returns_input_unchanged(self) -> None:
+        chunks = ["one", "two"]
+        self.assertEqual(apply_chunk_overlap(chunks, 0), chunks)
+
+    def test_single_chunk_is_unchanged(self) -> None:
+        self.assertEqual(apply_chunk_overlap(["only"], 100), ["only"])
+
+    def test_tail_of_previous_chunk_is_prefixed(self) -> None:
+        chunks = ["first line\nlast line of one", "body of two"]
+        overlapped = apply_chunk_overlap(chunks, 1)
+        self.assertEqual(overlapped[0], chunks[0])
+        self.assertTrue(overlapped[1].startswith("last line of one\n\n"))
+        self.assertTrue(overlapped[1].endswith("body of two"))
+
+    def test_overlap_never_exceeds_whole_previous_chunk(self) -> None:
+        overlapped = apply_chunk_overlap(["ab", "cd"], 10_000)
+        self.assertEqual(overlapped, ["ab", "ab\n\ncd"])
+
+    def test_overlap_uses_original_predecessor_not_overlapped_text(self) -> None:
+        overlapped = apply_chunk_overlap(["A", "B", "C"], 10_000)
+        self.assertEqual(overlapped, ["A", "A\n\nB", "B\n\nC"])
+
+    def test_boundary_count_is_preserved(self) -> None:
+        chunks = ["one one one", "two two two", "three three three"]
+        self.assertEqual(len(apply_chunk_overlap(chunks, 2)), len(chunks))
 
 
 if __name__ == "__main__":

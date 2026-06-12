@@ -195,6 +195,28 @@ Already shipped:
   `RAG Ready Export` built-in template now sets `chunk_token_budget=800`,
   so running it via `to_packaging_kwargs` produces retrieval-sized chunks
   by default.
+- Minimum chunk size and chunk overlap (both profile-bound active fields,
+  default 0 = off, so existing exports are byte-identical):
+  `Profile.chunk_min_tokens` merges chunks under the floor into a neighbor
+  via `chunking.merge_undersized_chunks` — combined chunks carry boundary
+  reason `chunking.REASON_MERGED_SMALL`, merging never exceeds the chunk
+  budget (an undersized chunk between full neighbors stays as-is), and it
+  applies everywhere documents are chunked: previews, the corpus audit,
+  selection re-chunking, heading rules, and the `rag`/`cowork` JSONL, so
+  changing it clears chunk selections like any other boundary-affecting
+  setting. `Profile.chunk_overlap_tokens` applies only to
+  `rag_ready/chunks.jsonl` via `chunking.apply_chunk_overlap`: each chunk
+  is prefixed with whole trailing lines of its original predecessor until
+  the overlap budget is covered (capped at one full chunk); boundaries,
+  chunk counts, indices, and selections are unchanged, so previews show
+  chunks without the overlap text and the UI says so. Both are wired
+  through `run_packaging_job(chunk_min_tokens=..., chunk_overlap_tokens=
+  ...)`, have number inputs in chunk review, and re-run from the CLI via
+  `--profile`. The pipeline warns (without failing) when either value is
+  not below the effective chunk budget. Documented generated-file change:
+  the chunk-splitting paragraph in `00_RAG_EXPORT_NOTES.md` now describes
+  the configurable strategy/overlap/minimum instead of telling users to
+  pre-process for overlap.
 - Profile-bound file review selection: `Profile.exclude_files` (active
   field) holds case-insensitive glob patterns matched by
   `scanner.match_path_patterns` against source-relative POSIX paths.
@@ -210,7 +232,7 @@ Already shipped:
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (21 fields total) + `save_profile`,
+  - `Profile` dataclass (23 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -219,12 +241,12 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the thirteen fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the fifteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
-    `chunk_heading_level`).
+    `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -237,6 +259,20 @@ Already shipped:
   - Forward-compat: unknown JSON keys are dropped on load, a
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
+- CLI profile support (a documented CLI addition under repository rule 2;
+  behavior without `--profile` is unchanged, including error messages and
+  exit codes): `pack_project.py --profile <name>` loads a saved profile
+  from `~/.llm_project_packer/profiles/` (falling back to built-in template
+  names), builds kwargs via `Profile.to_packaging_kwargs(...)`, and runs
+  `run_packaging_job(...)` — so a profile saved in the UI, including the
+  full chunking configuration (chunk size, strategy, heading level, corpus
+  chunk rules) and `exclude_files`, re-runs identically from the CLI. With
+  `--profile`, `source_dir`, `--target`, and `--mode` become optional and
+  fall back to profile values; explicit flags still override the profile,
+  and `--exclude-dirs` adds to the profile's list. `--profiles-dir <path>`
+  redirects profile storage (mirroring the `profiles_dir` parameter on the
+  profile API). An unknown profile name fails with exit code 2 and lists
+  the available saved and built-in names.
 - JSON file support in `packer/presets.py` and `packer/readers.py`:
   `.json` classifies as file type `json` and `_read_json` renders objects
   as Markdown with one heading per key (top level `##`, nested objects one
@@ -245,9 +281,10 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (27 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), `test_profiles.py` (31 cases), and
-  `test_bundler.py` (4 cases) — 94 in total; passes with
+  `test_pipeline.py` (30 cases), `test_chunking.py` (38 cases),
+  `test_readers.py` (6 cases), `test_profiles.py` (33 cases),
+  `test_cli.py` (11 cases), and
+  `test_bundler.py` (4 cases) — 122 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -393,6 +430,11 @@ python pack_project.py .\sample_input --target cowork  --mode balanced --output 
 python pack_project.py                                              # prints help + clear error, exit code 2
 python pack_project.py .\sample_input --target chatgpt              # argparse error: --mode required
 python pack_project.py .\does\not\exist --target chatgpt --mode balanced  # config error, exit code 2
+
+# Profile-driven CLI runs
+python pack_project.py .\sample_input --profile "RAG Ready Export" --output .\test_output   # rag/balanced with 800-token chunks from the template
+python pack_project.py .\sample_input --profile "RAG Ready Export" --target generic --mode lean --output .\test_output  # flags override the profile
+python pack_project.py .\sample_input --profile "No Such Profile"  # error listing saved + built-in names, exit code 2
 ```
 
 UI smoke checks for the scan/review screens:
@@ -458,6 +500,20 @@ Manual Streamlit inputs and expected outputs:
 - Change `Chunk size (tokens)` after making a selection.
   Expected: selections made at the old size are cleared and an info message
   reports how many were reset.
+- Set `Min chunk size (tokens, 0 = off)` to `20`, preview a document with a
+  tiny heading section (e.g., a converted JSON record) under the heading
+  strategy.
+  Expected: undersized sections merge into a neighbor with boundary reason
+  `undersized chunk merged into its neighbor`; chunk counts drop in the
+  corpus audit; changing the value clears selections like a chunk-size
+  change; merging never pushes a chunk over the budget.
+- Set `Chunk overlap (tokens, 0 = off)` to `40` with `--target rag`
+  semantics, then export.
+  Expected: the preview warning lists the overlap, each chunk after the
+  first in `rag_ready/chunks.jsonl` starts with the tail of its
+  predecessor, chunk counts and ids match the preview (previews show
+  chunks without the overlap text), and changing the overlap does not
+  clear chunk selections.
 - In `Corpus chunking audit` with the heading strategy, open the
   `Heading browser` after analyzing.
   Expected: one row per distinct chunk heading with chunk/token/document

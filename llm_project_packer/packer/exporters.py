@@ -13,8 +13,10 @@ from .chunking import (
     DEFAULT_HEADING_LEVEL,
     STRATEGY_HEADINGS,
     STRATEGY_TOKENS,
-    chunk_markdown,
+    apply_chunk_overlap,
     chunk_markdown_by_headings_with_reasons,
+    chunk_markdown_with_reasons,
+    merge_undersized_chunks,
 )
 from .manifest import Manifest
 from .markdown_utils import safe_filename
@@ -295,9 +297,11 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         "- `text`      — chunk text",
         "- `token_estimate` — estimated token count for this chunk",
         "",
-        "Chunks in Version 1 are split greedily by paragraph against the per-chunk token budget. "
-        "If you want overlap, smaller chunks, or sentence-level splitting, pre-process "
-        "`chunks.jsonl` before embedding.",
+        "Chunks are split greedily by paragraph against the per-chunk token budget "
+        "(or at headings when the heading strategy is selected). Chunk size, strategy, "
+        "overlap between adjacent chunks, and a minimum chunk size that merges tiny "
+        "chunks are all configurable in the chunk review screen and saved profiles. "
+        "If you want sentence-level splitting, pre-process `chunks.jsonl` before embedding.",
         "",
         "## Optimizing this export for retrieval",
         "",
@@ -347,12 +351,17 @@ def write_rag_export(
     max_chunk_tokens: int,
     chunk_strategy: str = STRATEGY_TOKENS,
     heading_level: int = DEFAULT_HEADING_LEVEL,
+    min_chunk_tokens: int = 0,
+    overlap_tokens: int = 0,
 ) -> None:
     """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``.
 
-    The default token strategy preserves V1 output exactly. Callers that ran
-    chunk review can pass ``chunk_strategy``/``heading_level`` so the JSONL
-    chunks match what the user previewed.
+    The defaults preserve V1 output exactly. Callers that ran chunk review
+    can pass ``chunk_strategy``/``heading_level``/``min_chunk_tokens`` so the
+    JSONL chunk boundaries match what the user previewed.
+    ``overlap_tokens > 0`` additionally prefixes each chunk with the tail of
+    its predecessor (boundaries and chunk count are unchanged; only the
+    exported text gains the overlap).
     """
     rag_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = rag_dir / "chunks.jsonl"
@@ -383,14 +392,15 @@ def write_rag_export(
                 continue
 
             if chunk_strategy == STRATEGY_HEADINGS:
-                chunk_texts = [
-                    chunk_text
-                    for chunk_text, _ in chunk_markdown_by_headings_with_reasons(
-                        text, max_chunk_tokens, heading_level
-                    )
-                ]
+                pairs = chunk_markdown_by_headings_with_reasons(
+                    text, max_chunk_tokens, heading_level
+                )
             else:
-                chunk_texts = chunk_markdown(text, max_chunk_tokens)
+                pairs = chunk_markdown_with_reasons(text, max_chunk_tokens)
+            pairs = merge_undersized_chunks(pairs, min_chunk_tokens, max_chunk_tokens)
+            chunk_texts = apply_chunk_overlap(
+                [chunk_text for chunk_text, _ in pairs], overlap_tokens
+            )
             chunk_ids: List[str] = []
             for i, chunk_text in enumerate(chunk_texts, start=1):
                 chunk_id = f"{doc.entry.doc_id}__c{i:03d}"

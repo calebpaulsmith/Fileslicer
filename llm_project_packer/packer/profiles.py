@@ -53,6 +53,8 @@ ACTIVE_FIELDS: Sequence[str] = (
     "chunk_token_budget",
     "chunk_strategy",
     "chunk_heading_level",
+    "chunk_min_tokens",
+    "chunk_overlap_tokens",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -90,6 +92,8 @@ class Profile:
     chunk_token_budget: Optional[int] = None
     chunk_strategy: str = STRATEGY_TOKENS
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL
+    chunk_min_tokens: int = 0
+    chunk_overlap_tokens: int = 0
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -133,6 +137,10 @@ class Profile:
             )
         if not 1 <= int(self.chunk_heading_level) <= 6:
             raise ValueError("chunk_heading_level must be between 1 and 6.")
+        if int(self.chunk_min_tokens) < 0:
+            raise ValueError("chunk_min_tokens must be >= 0 (0 disables merging).")
+        if int(self.chunk_overlap_tokens) < 0:
+            raise ValueError("chunk_overlap_tokens must be >= 0 (0 disables overlap).")
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the profile to a JSON-friendly dict, including a schema tag."""
@@ -198,6 +206,8 @@ class Profile:
             "chunk_token_budget": self.chunk_token_budget,
             "chunk_strategy": self.chunk_strategy,
             "chunk_heading_level": int(self.chunk_heading_level),
+            "chunk_min_tokens": int(self.chunk_min_tokens),
+            "chunk_overlap_tokens": int(self.chunk_overlap_tokens),
         }
         return kwargs
 
