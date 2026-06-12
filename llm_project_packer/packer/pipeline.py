@@ -601,6 +601,53 @@ def preview_document_chunks(
     )
 
 
+@dataclass(frozen=True)
+class HeadingSummary:
+    """Aggregate stats for one first-heading across a corpus chunk audit."""
+
+    heading: str  # "" groups chunks that have no leading heading
+    chunk_count: int
+    token_estimate: int
+    document_count: int
+
+
+def corpus_heading_summary(
+    previews: Mapping[str, DocumentChunkPreview],
+) -> List[HeadingSummary]:
+    """Aggregate corpus-audit chunks by their first heading.
+
+    Groups case-insensitively (the first casing seen is displayed), counts
+    chunks, token estimates, and distinct documents per heading, and sorts
+    by token estimate descending. Chunks without a leading heading group
+    under the empty string.
+    """
+    stats: Dict[str, Dict[str, Any]] = {}
+    for path, preview in previews.items():
+        if preview.status != "ok":
+            continue
+        for chunk in preview.chunks:
+            heading = chunk.first_heading.strip()
+            key = heading.lower()
+            entry = stats.setdefault(
+                key,
+                {"heading": heading, "chunks": 0, "tokens": 0, "docs": set()},
+            )
+            entry["chunks"] += 1
+            entry["tokens"] += chunk.token_estimate
+            entry["docs"].add(path)
+    summaries = [
+        HeadingSummary(
+            heading=entry["heading"],
+            chunk_count=entry["chunks"],
+            token_estimate=entry["tokens"],
+            document_count=len(entry["docs"]),
+        )
+        for entry in stats.values()
+    ]
+    summaries.sort(key=lambda item: (-item.token_estimate, item.heading.lower()))
+    return summaries
+
+
 def chunking_guidance(
     previews: Mapping[str, DocumentChunkPreview],
     max_chunk_tokens: int,
