@@ -82,6 +82,8 @@ def run_packaging_job(
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     chunk_exclude_headings: Optional[Sequence[str]] = None,
+    chunk_min_tokens: int = 0,
+    chunk_overlap_tokens: int = 0,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -113,6 +115,13 @@ def run_packaging_job(
     after the scan and never appear in the manifest. ``included_files`` is
     an explicit allowlist that already encodes any exclusions, so callers
     pass one or the other, not both.
+
+    ``chunk_min_tokens`` (0 disables) merges chunks under the floor into a
+    neighbor wherever documents are chunked — previews, selections, heading
+    rules, and the ``rag``/``cowork`` JSONL. ``chunk_overlap_tokens`` (0
+    disables) applies only to ``rag_ready/chunks.jsonl``: each chunk is
+    prefixed with the tail of its predecessor without moving boundaries, so
+    chunk indices and selections are unaffected.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -143,6 +152,8 @@ def run_packaging_job(
         chunk_strategy=chunk_strategy,
         chunk_heading_level=chunk_heading_level,
         chunk_exclude_headings=chunk_exclude_headings,
+        chunk_min_tokens=chunk_min_tokens,
+        chunk_overlap_tokens=chunk_overlap_tokens,
         progress_callback=progress_callback,
     )
 
@@ -157,6 +168,8 @@ def run_packaging_config(
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     chunk_exclude_headings: Optional[Sequence[str]] = None,
+    chunk_min_tokens: int = 0,
+    chunk_overlap_tokens: int = 0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -233,14 +246,24 @@ def run_packaging_config(
         data_dir=data_dir,
     )
     converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
+    effective_chunk_tokens = chunk_token_budget or cfg.max_bundle_tokens
+    if chunk_min_tokens and chunk_min_tokens >= effective_chunk_tokens:
+        warning = (
+            f"chunk_min_tokens ({chunk_min_tokens}) is not below the chunk "
+            f"budget ({effective_chunk_tokens}); most chunks will merge up to "
+            "the budget."
+        )
+        warnings.append(warning)
+        emit("warning", f"  Warning: {warning}")
     if chunk_selections or chunk_exclude_headings:
         converted_docs = _apply_chunk_selections(
             converted_docs,
             chunk_selections=chunk_selections or {},
             exclude_headings=tuple(chunk_exclude_headings or ()),
-            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            max_chunk_tokens=effective_chunk_tokens,
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
+            chunk_min_tokens=chunk_min_tokens,
             source_dir=cfg.source_dir,
             warnings=warnings,
             emit=emit,
@@ -278,13 +301,23 @@ def run_packaging_config(
             "rag_start",
             f"Target is {cfg.target!r}; chunking documents for retrieval.",
         )
+        if chunk_overlap_tokens and chunk_overlap_tokens >= effective_chunk_tokens:
+            warning = (
+                f"chunk_overlap_tokens ({chunk_overlap_tokens}) is not below "
+                f"the chunk budget ({effective_chunk_tokens}); adjacent chunks "
+                "will repeat most of their text."
+            )
+            warnings.append(warning)
+            emit("warning", f"  Warning: {warning}")
         rag_dir = export_dir / "rag_ready"
         write_rag_export(
             rag_dir,
             converted_docs=converted_docs,
-            max_chunk_tokens=chunk_token_budget or cfg.max_bundle_tokens,
+            max_chunk_tokens=effective_chunk_tokens,
             chunk_strategy=chunk_strategy,
             heading_level=chunk_heading_level,
+            min_chunk_tokens=chunk_min_tokens,
+            overlap_tokens=chunk_overlap_tokens,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
         if cfg.target == "cowork":
@@ -399,6 +432,7 @@ def _apply_chunk_selections(
     max_chunk_tokens: int,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_min_tokens: int = 0,
     source_dir: Path,
     warnings: List[str],
     emit: Callable[..., None],
@@ -423,6 +457,7 @@ def _apply_chunk_selections(
                         max_chunk_tokens=max_chunk_tokens,
                         chunk_strategy=chunk_strategy,
                         chunk_heading_level=chunk_heading_level,
+                        chunk_min_tokens=chunk_min_tokens,
                         warnings=warnings,
                         emit=emit,
                     )
@@ -437,6 +472,7 @@ def _apply_chunk_selections(
             max_chunk_tokens,
             strategy=chunk_strategy,
             heading_level=chunk_heading_level,
+            min_tokens=chunk_min_tokens,
         )
         if not requested:
             doc.entry.status = "skipped"
@@ -498,6 +534,7 @@ def _apply_heading_rules(
     max_chunk_tokens: int,
     chunk_strategy: str,
     chunk_heading_level: int,
+    chunk_min_tokens: int = 0,
     warnings: List[str],
     emit: Callable[..., None],
 ) -> List[ConvertedDoc]:
@@ -506,6 +543,7 @@ def _apply_heading_rules(
         max_chunk_tokens,
         strategy=chunk_strategy,
         heading_level=chunk_heading_level,
+        min_tokens=chunk_min_tokens,
     )
     kept_chunks: List[Chunk] = []
     excluded = 0
@@ -571,6 +609,7 @@ def preview_document_chunks(
     max_chunk_tokens: int,
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
+    chunk_min_tokens: int = 0,
 ) -> DocumentChunkPreview:
     """Convert one file in a temporary workspace and return its chunk preview.
 
@@ -597,6 +636,7 @@ def preview_document_chunks(
             max_chunk_tokens,
             strategy=chunk_strategy,
             heading_level=chunk_heading_level,
+            min_tokens=chunk_min_tokens,
         ),
     )
 
@@ -690,9 +730,10 @@ def chunking_guidance(
     if chunk_strategy == "headings" and tiny > len(chunks) // 4:
         tips.append(
             f"{tiny} of {len(chunks)} chunks are under {tiny_threshold} tokens — "
-            "typically small metadata or boilerplate sections. Deselect them "
-            "during review, split at a shallower heading level so they merge "
-            "into neighbors, or accept them if those fields matter for lookup."
+            "typically small metadata or boilerplate sections. Set a minimum "
+            "chunk size to merge them into neighbors, deselect them during "
+            "review, split at a shallower heading level, or accept them if "
+            "those fields matter for lookup."
         )
 
     single_chunk_docs = sum(1 for p in converted if len(p.chunks) == 1)

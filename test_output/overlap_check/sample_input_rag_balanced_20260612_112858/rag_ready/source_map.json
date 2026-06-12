@@ -1,0 +1,36 @@
+{
+  "DOC_0001": {
+    "source_file": "data.csv",
+    "source_path": "data.csv",
+    "chunk_ids": [
+      "DOC_0001__c001",
+      "DOC_0001__c002"
+    ],
+    "token_estimate": 99
+  },
+  "DOC_0003": {
+    "source_file": "icon.png",
+    "source_path": "notes/icon.png",
+    "chunk_ids": [
+      "DOC_0003__c001"
+    ],
+    "token_estimate": 53
+  },
+  "DOC_0004": {
+    "source_file": "quick.txt",
+    "source_path": "notes/quick.txt",
+    "chunk_ids": [
+      "DOC_0004__c001"
+    ],
+    "token_estimate": 49
+  },
+  "DOC_0005": {
+    "source_file": "README.md",
+    "source_path": "notes/README.md",
+    "chunk_ids": [
+      "DOC_0005__c001",
+      "DOC_0005__c002"
+    ],
+    "token_estimate": 87
+  }
+}

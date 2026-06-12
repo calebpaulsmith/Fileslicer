@@ -23,6 +23,7 @@ REASON_OVERSIZE_SPLIT = "oversize paragraph split at line boundaries"
 REASON_END_OF_DOCUMENT = "end of document"
 REASON_HEADING_SECTION = "section starts at a heading"
 REASON_PREAMBLE = "content before the first heading"
+REASON_MERGED_SMALL = "undersized chunk merged into its neighbor"
 
 STRATEGY_TOKENS = "tokens"
 STRATEGY_HEADINGS = "headings"
@@ -131,6 +132,7 @@ def chunk_document(
     max_tokens: int,
     strategy: str = STRATEGY_TOKENS,
     heading_level: int = DEFAULT_HEADING_LEVEL,
+    min_tokens: int = 0,
 ) -> List[Chunk]:
     """Chunk a converted document body into indexed, annotated chunks.
 
@@ -140,6 +142,10 @@ def chunk_document(
     each section becomes its own chunk, with the token chunker applied only
     inside sections that exceed the budget. Documents without qualifying
     headings fall back to the token strategy.
+
+    ``min_tokens`` is an opt-in floor (0 disables it): chunks smaller than it
+    are merged into a neighbor via :func:`merge_undersized_chunks`, including
+    across heading-section boundaries.
     """
     text = (body_markdown or "").strip()
     if not text:
@@ -148,6 +154,7 @@ def chunk_document(
         pairs = chunk_markdown_by_headings_with_reasons(text, max_tokens, heading_level)
     else:
         pairs = chunk_markdown_with_reasons(text, max_tokens)
+    pairs = merge_undersized_chunks(pairs, min_tokens, max_tokens)
     return [
         Chunk(
             index=i,
@@ -209,6 +216,68 @@ def chunk_markdown_by_headings_with_reasons(
         else:
             pairs.extend(chunk_markdown_with_reasons(section, max_tokens))
     return pairs
+
+
+def merge_undersized_chunks(
+    pairs: Sequence[Tuple[str, str]],
+    min_tokens: int,
+    max_tokens: int,
+) -> List[Tuple[str, str]]:
+    """Merge chunks smaller than ``min_tokens`` into a neighbor.
+
+    Walks the chunks in order; whenever the current or the previous chunk is
+    under the floor and their combination stays within ``max_tokens``
+    (ignored when ``max_tokens <= 0``), they are joined and the combined
+    chunk's reason becomes :data:`REASON_MERGED_SMALL`. An undersized chunk
+    whose neighbors would go over budget is left as-is — the budget always
+    wins. ``min_tokens <= 0`` returns the input unchanged.
+    """
+    if min_tokens <= 0 or len(pairs) <= 1:
+        return list(pairs)
+    merged: List[Tuple[str, str, int]] = []
+    for text, reason in pairs:
+        tokens = estimate_tokens(text)
+        if merged:
+            last_text, _, last_tokens = merged[-1]
+            if tokens < min_tokens or last_tokens < min_tokens:
+                combined = f"{last_text}\n\n{text}"
+                combined_tokens = estimate_tokens(combined)
+                if max_tokens <= 0 or combined_tokens <= max_tokens:
+                    merged[-1] = (combined, REASON_MERGED_SMALL, combined_tokens)
+                    continue
+        merged.append((text, reason, tokens))
+    return [(text, reason) for text, reason, _ in merged]
+
+
+def apply_chunk_overlap(chunk_texts: Sequence[str], overlap_tokens: int) -> List[str]:
+    """Prefix each chunk after the first with the tail of its predecessor.
+
+    The tail is taken as whole trailing lines of the original (un-overlapped)
+    previous chunk until at least ``overlap_tokens`` tokens are covered, so
+    overlap never cuts mid-line and never exceeds one full chunk. Chunk
+    boundaries, count, and order are unchanged; ``overlap_tokens <= 0``
+    returns the input unchanged. Intended for retrieval exports where
+    adjacent-chunk context improves recall.
+    """
+    if overlap_tokens <= 0 or len(chunk_texts) <= 1:
+        return list(chunk_texts)
+    result = [chunk_texts[0]]
+    for previous, current in zip(chunk_texts, chunk_texts[1:]):
+        tail = _overlap_tail(previous, overlap_tokens)
+        result.append(f"{tail}\n\n{current}" if tail else current)
+    return result
+
+
+def _overlap_tail(text: str, overlap_tokens: int) -> str:
+    lines = text.split("\n")
+    tail: List[str] = []
+    total = 0
+    for line in reversed(lines):
+        tail.insert(0, line)
+        total += estimate_tokens(line)
+        if total >= overlap_tokens:
+            break
+    return "\n".join(tail).strip()
 
 
 def _starts_with_heading(section: str, heading_level: int) -> bool:

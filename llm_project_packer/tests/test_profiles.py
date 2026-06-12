@@ -113,10 +113,29 @@ class ProfileDataclassTests(ProfilesTestCase):
             "chunk_token_budget",
             "chunk_strategy",
             "chunk_heading_level",
+            "chunk_min_tokens",
+            "chunk_overlap_tokens",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
             self.assertNotIn(inert, kwargs)
+
+    def test_validate_rejects_negative_chunk_min_and_overlap(self) -> None:
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_min_tokens=-1).validate()
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_overlap_tokens=-1).validate()
+
+    def test_to_packaging_kwargs_carries_chunk_min_and_overlap(self) -> None:
+        profile = Profile(
+            profile_name="p",
+            default_source_folder="C:/data",
+            chunk_min_tokens=40,
+            chunk_overlap_tokens=80,
+        )
+        kwargs = profile.to_packaging_kwargs()
+        self.assertEqual(kwargs["chunk_min_tokens"], 40)
+        self.assertEqual(kwargs["chunk_overlap_tokens"], 80)
 
     def test_to_packaging_kwargs_uses_overrides(self) -> None:
         profile = Profile(

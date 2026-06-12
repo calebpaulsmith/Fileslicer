@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 import unittest
@@ -337,6 +338,94 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(len(lines), 2)
             self.assertIn("## One", lines[0])
             self.assertIn("## Two", lines[1])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rag_export_applies_chunk_overlap(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "doc.md").write_text(
+                "## One\n\nFirst section.\n\n## Two\n\nSecond section.\n",
+                encoding="utf-8",
+            )
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_overlap_tokens=5,
+            )
+            chunks_path = result.export_dir / "rag_ready" / "chunks.jsonl"
+            lines = chunks_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 2)
+            first = json.loads(lines[0])
+            second = json.loads(lines[1])
+            self.assertEqual(first["text"], "## One\n\nFirst section.")
+            self.assertIn("First section.", second["text"])
+            self.assertTrue(second["text"].endswith("Second section."))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rag_export_merges_undersized_chunks(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "doc.md").write_text(
+                "## A\n\ntiny\n\n## B\n\nA longer section with several words in it.\n",
+                encoding="utf-8",
+            )
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_min_tokens=20,
+            )
+            chunks_path = result.export_dir / "rag_ready" / "chunks.jsonl"
+            lines = chunks_path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn("tiny", lines[0])
+            self.assertIn("longer section", lines[0])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_chunk_selection_uses_merged_boundaries(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "doc.md").write_text(
+                "## A\n\ntiny\n\n## B\n\nA longer section with several words in it.\n",
+                encoding="utf-8",
+            )
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="generic",
+                mode="lean",
+                chunk_selections={"doc.md": [1]},
+                chunk_token_budget=1000,
+                chunk_strategy=STRATEGY_HEADINGS,
+                chunk_min_tokens=20,
+            )
+            bundle_text = result.bundle_paths[0].read_text(encoding="utf-8")
+            self.assertIn("tiny", bundle_text)
+            self.assertIn("longer section", bundle_text)
+            manifest_text = result.manifest_paths["markdown"].read_text(encoding="utf-8")
+            self.assertNotIn("Partial content", manifest_text)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

@@ -1100,9 +1100,10 @@ def _export_chunk_selections(
     key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
     files: Sequence[ScannedFile],
     selections: Dict[str, bool],
-) -> Tuple[Dict[str, List[int]], int | None, str, int]:
+) -> Tuple[Dict[str, List[int]], int | None, str, int, int, int]:
     """Return partial chunk selections for included files plus the chunk
-    settings (budget, strategy, heading level) they were made under.
+    settings (budget, strategy, heading level, min size, overlap) they were
+    made under.
 
     The chunk settings come from the active profile (the review widgets bind
     to it), so a RAG export's ``chunks.jsonl`` matches what the user
@@ -1118,6 +1119,8 @@ def _export_chunk_selections(
     )
     strategy = profile.chunk_strategy
     heading_level = int(profile.chunk_heading_level)
+    min_tokens = int(profile.chunk_min_tokens or 0)
+    overlap_tokens = int(profile.chunk_overlap_tokens or 0)
     for relative_path, state in store.items():
         if relative_path not in included:
             continue
@@ -1128,7 +1131,8 @@ def _export_chunk_selections(
         budget = int(state.get("budget", DEFAULT_CHUNK_REVIEW_TOKENS))  # type: ignore[arg-type]
         strategy = str(state.get("strategy", STRATEGY_TOKENS))
         heading_level = int(state.get("heading_level", DEFAULT_HEADING_LEVEL))  # type: ignore[arg-type]
-    return partial, budget, strategy, heading_level
+        min_tokens = int(state.get("min_tokens", 0))  # type: ignore[arg-type]
+    return partial, budget, strategy, heading_level, min_tokens, overlap_tokens
 
 
 def _chunk_rule_patterns(profile: Profile) -> Tuple[str, ...]:
@@ -1241,6 +1245,45 @@ def _render_chunk_review(
         )
         profile.chunk_token_budget = budget
 
+    col_min, col_overlap = st.columns(2)
+    with col_min:
+        min_tokens = int(
+            st.number_input(
+                "Min chunk size (tokens, 0 = off)",
+                min_value=0,
+                value=int(profile.chunk_min_tokens or 0),
+                step=10,
+                key=_key("chunk_min_tokens"),
+                help=(
+                    "Chunks smaller than this merge into a neighbor — but "
+                    "never past the chunk size; an undersized chunk between "
+                    "full neighbors stays as-is. Useful for tiny metadata or "
+                    "boilerplate sections. Changing it re-chunks documents "
+                    "and clears selections made under different settings. "
+                    "Saved with the profile."
+                ),
+            )
+        )
+        profile.chunk_min_tokens = min_tokens
+    with col_overlap:
+        overlap_tokens = int(
+            st.number_input(
+                "Chunk overlap (tokens, 0 = off)",
+                min_value=0,
+                value=int(profile.chunk_overlap_tokens or 0),
+                step=10,
+                key=_key("chunk_overlap_tokens"),
+                help=(
+                    "rag/cowork exports only: each chunk in "
+                    "rag_ready/chunks.jsonl is prefixed with the tail of the "
+                    "previous chunk. Boundaries, chunk counts, and selections "
+                    "are unchanged, so previews show chunks without the "
+                    "overlap text. Saved with the profile."
+                ),
+            )
+        )
+        profile.chunk_overlap_tokens = overlap_tokens
+
     stale_paths = [
         relative_path
         for relative_path, state in store.items()
@@ -1248,6 +1291,7 @@ def _render_chunk_review(
             int(state.get("budget", -1)) != budget  # type: ignore[arg-type]
             or str(state.get("strategy", STRATEGY_TOKENS)) != strategy
             or int(state.get("heading_level", DEFAULT_HEADING_LEVEL)) != heading_level  # type: ignore[arg-type]
+            or int(state.get("min_tokens", 0)) != min_tokens  # type: ignore[arg-type]
             or tuple(state.get("rules", ())) != rules  # type: ignore[arg-type]
         )
     ]
@@ -1260,7 +1304,7 @@ def _render_chunk_review(
         )
 
     _render_corpus_chunk_audit(
-        key, eligible, budget, strategy, heading_level, rules, widget_prefix
+        key, eligible, budget, strategy, heading_level, min_tokens, rules, widget_prefix
     )
 
     paths = [str(scanned.relative_path) for scanned in eligible]
@@ -1269,7 +1313,14 @@ def _render_chunk_review(
     source_root = _resolved_source_path(_profile())
 
     cache = st.session_state[SESSION_KEY_CHUNK_PREVIEWS]
-    cache_key = (_selection_store_key(key), chosen, budget, strategy, heading_level)
+    cache_key = (
+        _selection_store_key(key),
+        chosen,
+        budget,
+        strategy,
+        heading_level,
+        min_tokens,
+    )
     col_preview, col_refresh = st.columns([1, 1])
     preview_clicked = col_preview.button(
         "Preview chunks",
@@ -1282,7 +1333,7 @@ def _render_chunk_review(
     if preview_clicked and cache_key not in cache:
         with st.spinner(f"Converting and chunking {chosen}..."):
             cache[cache_key] = preview_document_chunks(
-                scanned, source_root, budget, strategy, heading_level
+                scanned, source_root, budget, strategy, heading_level, min_tokens
             )
 
     preview = cache.get(cache_key)
@@ -1293,6 +1344,7 @@ def _render_chunk_review(
             budget,
             strategy,
             heading_level,
+            min_tokens,
             rules,
             preview,
             store,
@@ -1309,14 +1361,16 @@ def _corpus_audit_key(
     budget: int,
     strategy: str,
     heading_level: int,
+    min_tokens: int,
     eligible: Sequence[ScannedFile],
-) -> Tuple[str, int, str, int, str]:
+) -> Tuple[str, int, str, int, int, str]:
     paths = tuple(sorted(str(scanned.relative_path) for scanned in eligible))
     return (
         _selection_store_key(key),
         budget,
         strategy,
         heading_level,
+        min_tokens,
         sha1(repr(paths).encode("utf-8")).hexdigest()[:12],
     )
 
@@ -1327,6 +1381,7 @@ def _render_corpus_chunk_audit(
     budget: int,
     strategy: str,
     heading_level: int,
+    min_tokens: int,
     rules: Tuple[str, ...],
     widget_prefix: str,
 ) -> None:
@@ -1338,7 +1393,9 @@ def _render_corpus_chunk_audit(
             "before reviewing individual documents."
         )
         audit_store = st.session_state[SESSION_KEY_CORPUS_AUDIT]
-        audit_key = _corpus_audit_key(key, budget, strategy, heading_level, eligible)
+        audit_key = _corpus_audit_key(
+            key, budget, strategy, heading_level, min_tokens, eligible
+        )
         if st.button(
             f"Analyze corpus chunking ({len(eligible)} document(s))",
             key=f"{widget_prefix}_corpus",
@@ -1355,10 +1412,11 @@ def _render_corpus_chunk_audit(
                     budget,
                     strategy,
                     heading_level,
+                    min_tokens,
                 )
                 if cache_key not in cache:
                     cache[cache_key] = preview_document_chunks(
-                        scanned, source_root, budget, strategy, heading_level
+                        scanned, source_root, budget, strategy, heading_level, min_tokens
                     )
                 previews[relative_path] = cache[cache_key]
                 progress.progress(int(position / len(eligible) * 100))
@@ -1620,6 +1678,7 @@ def _render_chunk_editor(
     budget: int,
     strategy: str,
     heading_level: int,
+    min_tokens: int,
     rules: Tuple[str, ...],
     preview: DocumentChunkPreview,
     store: Dict[str, Dict[str, object]],
@@ -1653,6 +1712,7 @@ def _render_chunk_editor(
             "budget": budget,
             "strategy": strategy,
             "heading_level": heading_level,
+            "min_tokens": min_tokens,
             "rules": list(rules),
             "selected": default_selected,
             "total": len(preview.chunks),
@@ -1702,7 +1762,8 @@ def _render_chunk_editor(
     ]
     editor_key = (
         f"{widget_prefix}_editor_{sha1(relative_path.encode('utf-8')).hexdigest()[:8]}"
-        f"_{budget}_{strategy}_{heading_level}_{_chunk_revision(key, relative_path)}"
+        f"_{budget}_{strategy}_{heading_level}_{min_tokens}"
+        f"_{_chunk_revision(key, relative_path)}"
     )
     edited_rows = st.data_editor(
         rows,
@@ -1860,9 +1921,14 @@ def _render_preview_and_export(
         profile.target,
         max_bundle_tokens,
     )
-    chunk_selections, chunk_token_budget, chunk_strategy, chunk_heading_level = (
-        _export_chunk_selections(key, files, selections)
-    )
+    (
+        chunk_selections,
+        chunk_token_budget,
+        chunk_strategy,
+        chunk_heading_level,
+        chunk_min_tokens,
+        chunk_overlap_tokens,
+    ) = _export_chunk_selections(key, files, selections)
     warnings = _preview_warnings(profile, files, selected_files)
     if chunk_selections:
         warnings.append(
@@ -1870,10 +1936,16 @@ def _render_preview_and_export(
             "their content will be trimmed at export."
         )
     if profile.target in ("rag", "cowork") and chunk_token_budget is not None:
-        warnings.append(
-            "rag_ready/chunks.jsonl will use the chunk review settings: "
+        details = (
             f"{chunk_token_budget:,} tokens per chunk, "
-            f"{CHUNK_STRATEGY_LABELS.get(chunk_strategy, chunk_strategy)} strategy."
+            f"{CHUNK_STRATEGY_LABELS.get(chunk_strategy, chunk_strategy)} strategy"
+        )
+        if chunk_min_tokens:
+            details += f", chunks under {chunk_min_tokens} tokens merged"
+        if chunk_overlap_tokens:
+            details += f", {chunk_overlap_tokens}-token overlap between chunks"
+        warnings.append(
+            f"rag_ready/chunks.jsonl will use the chunk review settings: {details}."
         )
     chunk_rules = _chunk_rule_patterns(profile)
     if chunk_rules:
@@ -1938,6 +2010,8 @@ def _render_preview_and_export(
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
             chunk_exclude_headings=list(chunk_rules),
+            chunk_min_tokens=chunk_min_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
         )
 
     last_result = st.session_state.get(SESSION_KEY_LAST_EXPORT_RESULT)
@@ -1955,6 +2029,8 @@ def _run_export(
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     chunk_exclude_headings: List[str] | None = None,
+    chunk_min_tokens: int = 0,
+    chunk_overlap_tokens: int = 0,
 ) -> None:
     source_dir = _resolved_source_path(profile)
     output_dir = _resolved_output_path(profile)
@@ -2000,6 +2076,8 @@ def _run_export(
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
             chunk_exclude_headings=chunk_exclude_headings or None,
+            chunk_min_tokens=chunk_min_tokens,
+            chunk_overlap_tokens=chunk_overlap_tokens,
             progress_callback=on_progress,
         )
     except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI
