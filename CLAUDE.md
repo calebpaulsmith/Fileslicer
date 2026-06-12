@@ -176,7 +176,14 @@ Already shipped:
   saved with it), rule-matched chunks default to deselected in per-document
   previews, the corpus audit shows per-rule match counts and flags rules
   that match nothing, and changing the rules clears selections like any
-  other chunk-setting change.
+  other chunk-setting change. The corpus audit also renders a "Heading
+  browser" (`pipeline.corpus_heading_summary` aggregates audit chunks by
+  first heading with chunk/token/document counts, sorted by token share):
+  ticking `exclude` on a heading appends it as an exact rule, unticking
+  removes exact-heading rules, headings covered only by wildcard rules
+  warn instead of unticking, and headingless chunks are reported as
+  untargetable by rules. Browser edits bump the form generation so the
+  rules text input refreshes from the profile.
 - Profile-bound chunk settings: `Profile.chunk_token_budget` (None means
   the pipeline default), `Profile.chunk_strategy`, and
   `Profile.chunk_heading_level` are active fields emitted by
@@ -238,9 +245,9 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (24 cases), `test_chunking.py` (26 cases),
+  `test_pipeline.py` (27 cases), `test_chunking.py` (26 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (31 cases), and
-  `test_bundler.py` (4 cases) — 91 in total; passes with
+  `test_bundler.py` (4 cases) — 94 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -451,6 +458,13 @@ Manual Streamlit inputs and expected outputs:
 - Change `Chunk size (tokens)` after making a selection.
   Expected: selections made at the old size are cleared and an info message
   reports how many were reset.
+- In `Corpus chunking audit` with the heading strategy, open the
+  `Heading browser` after analyzing.
+  Expected: one row per distinct chunk heading with chunk/token/document
+  counts sorted by token share; ticking `exclude` adds that heading to
+  `Corpus chunk rules` (the text input refreshes), unticking removes the
+  exact rule, a heading covered only by a wildcard rule warns instead of
+  unticking, and headingless chunks are reported as untargetable.
 - Enter `url, *_html` in `Corpus chunk rules`, preview a converted JSON
   record with the heading strategy.
   Expected: chunks whose first heading matches default to deselected with

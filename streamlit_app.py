@@ -42,6 +42,7 @@ from packer.pipeline import (  # noqa: E402
     PackResult,
     ProgressEvent,
     chunking_guidance,
+    corpus_heading_summary,
     preview_document_chunks,
     run_packaging_job,
 )
@@ -1396,6 +1397,8 @@ def _render_corpus_chunk_audit(
                     + ", ".join(repr(rule) for rule in unmatched)
                 )
 
+        _render_heading_browser(previews, rules, widget_prefix)
+
         tips = chunking_guidance(previews, budget, strategy, _profile().target)
         st.markdown("**Chunking guidance**")
         if tips:
@@ -1406,6 +1409,133 @@ def _render_corpus_chunk_audit(
                 "Nothing stood out: chunk sizes are within budget and match "
                 "the current strategy well."
             )
+
+
+def _render_heading_browser(
+    previews: Dict[str, DocumentChunkPreview],
+    rules: Tuple[str, ...],
+    widget_prefix: str,
+) -> None:
+    summaries = corpus_heading_summary(previews)
+    named = [summary for summary in summaries if summary.heading]
+    unnamed = next((summary for summary in summaries if not summary.heading), None)
+
+    st.markdown("**Heading browser**")
+    st.caption(
+        "Every distinct chunk heading in the corpus at the current settings, "
+        "largest token share first. Tick `exclude` to add a corpus chunk rule "
+        "that drops those chunks from every document (saved with the "
+        "profile); untick to remove an exact-heading rule."
+    )
+    if not named:
+        st.caption(
+            "No chunk headings found. The heading browser needs heading-led "
+            "chunks — try the heading strategy or heading-bearing documents."
+        )
+        if unnamed:
+            _caption_unnamed(unnamed)
+        return
+
+    total_tokens = sum(summary.token_estimate for summary in summaries) or 1
+    rows = [
+        {
+            "exclude": bool(match_heading_patterns(summary.heading, rules)),
+            "heading": summary.heading,
+            "chunks": summary.chunk_count,
+            "tokens": summary.token_estimate,
+            "token_share": f"{summary.token_estimate / total_tokens:.0%}",
+            "documents": summary.document_count,
+            "matched_by": ", ".join(match_heading_patterns(summary.heading, rules)),
+        }
+        for summary in named
+    ]
+    editor_key = (
+        f"{widget_prefix}_heading_browser_"
+        f"{sha1(repr(rules).encode('utf-8')).hexdigest()[:8]}"
+    )
+    edited_rows = st.data_editor(
+        rows,
+        hide_index=True,
+        key=editor_key,
+        **_dataframe_layout_kwargs(),
+        column_config={
+            "exclude": st.column_config.CheckboxColumn("exclude"),
+            "heading": st.column_config.TextColumn("heading"),
+            "chunks": st.column_config.NumberColumn("chunks", format="%d"),
+            "tokens": st.column_config.NumberColumn("tokens", format="%d"),
+            "token_share": st.column_config.TextColumn("token_share"),
+            "documents": st.column_config.NumberColumn("documents", format="%d"),
+            "matched_by": st.column_config.TextColumn("matched_by"),
+        },
+        disabled=["heading", "chunks", "tokens", "token_share", "documents", "matched_by"],
+    )
+
+    profile = _profile()
+    changed, glob_locked = _apply_heading_browser_edits(
+        _editor_records(edited_rows), rules, profile
+    )
+    if glob_locked:
+        st.warning(
+            "These headings are excluded by wildcard rules, so unticking them "
+            "here has no effect — edit the rules text instead: "
+            + "; ".join(glob_locked)
+        )
+    if unnamed:
+        _caption_unnamed(unnamed)
+    if changed:
+        st.session_state[SESSION_KEY_GEN] += 1
+        st.rerun()
+
+
+def _apply_heading_browser_edits(
+    records: List[Dict[str, object]],
+    rules: Tuple[str, ...],
+    profile: Profile,
+) -> Tuple[bool, List[str]]:
+    """Apply heading-browser checkbox edits to ``profile.chunk_exclude_headings``.
+
+    Ticking a heading appends it as an exact rule; unticking removes exact
+    rules for it. Headings covered only by wildcard rules cannot be unticked
+    here and are returned in the second element for a warning.
+    """
+    changed = False
+    glob_locked: List[str] = []
+    for record in records:
+        heading = str(record.get("heading", ""))
+        if not heading:
+            continue
+        wanted = bool(record.get("exclude", False))
+        currently = bool(match_heading_patterns(heading, rules))
+        if wanted and not currently:
+            profile.chunk_exclude_headings.append(heading)
+            changed = True
+        elif not wanted and currently:
+            exact = [
+                rule
+                for rule in profile.chunk_exclude_headings
+                if rule.strip().lower() == heading.strip().lower()
+            ]
+            if exact:
+                profile.chunk_exclude_headings = [
+                    rule
+                    for rule in profile.chunk_exclude_headings
+                    if rule.strip().lower() != heading.strip().lower()
+                ]
+                changed = True
+            else:
+                patterns = match_heading_patterns(heading, rules)
+                glob_locked.append(
+                    f"{heading} (matched by {', '.join(repr(p) for p in patterns)})"
+                )
+    return changed, glob_locked
+
+
+def _caption_unnamed(summary) -> None:
+    st.caption(
+        f"{summary.chunk_count} chunk(s) have no leading heading "
+        f"({summary.token_estimate:,} tokens); heading rules cannot target "
+        "them — use per-document chunk review instead."
+    )
 
 
 def _render_corpus_audit_results(

@@ -78,8 +78,10 @@ UI flow:
    tips. Corpus chunk rules (saved with the profile) exclude chunks whose
    first heading matches glob patterns like `*_html` or `content_hash`
    across every document at once — per-document selections override them.
-   Documents without a chunk selection export in full; trimmed documents
-   are noted in the manifest.
+   The audit's `Heading browser` lists every distinct chunk heading with
+   chunk/token counts so you can build those rules by ticking checkboxes
+   instead of typing patterns. Documents without a chunk selection export
+   in full; trimmed documents are noted in the manifest.
 6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
 7. Check the preview: included/skipped counts, target/mode, bundle budget,

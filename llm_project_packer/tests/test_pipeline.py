@@ -586,6 +586,61 @@ class ProfileDrivenExportTests(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
 
+class CorpusHeadingSummaryTests(unittest.TestCase):
+    @staticmethod
+    def preview(*headings: str, tokens: int = 100) -> DocumentChunkPreview:
+        from packer.chunking import ChunkStructure
+
+        chunks = [
+            Chunk(
+                index=i,
+                text="x",
+                token_estimate=tokens,
+                boundary_reason="section starts at a heading",
+                structure=ChunkStructure(
+                    headings=(heading,) if heading else (),
+                    paragraph_count=1,
+                    list_item_count=0,
+                    table_row_count=0,
+                ),
+            )
+            for i, heading in enumerate(headings, start=1)
+        ]
+        return DocumentChunkPreview(status="ok", notes="", chunks=chunks)
+
+    def test_groups_case_insensitively_and_counts_documents(self) -> None:
+        from packer.pipeline import corpus_heading_summary
+
+        previews = {
+            "a.json": self.preview("url", "summary"),
+            "b.json": self.preview("URL"),
+        }
+        summaries = corpus_heading_summary(previews)
+        by_key = {s.heading.lower(): s for s in summaries}
+        self.assertEqual(by_key["url"].chunk_count, 2)
+        self.assertEqual(by_key["url"].document_count, 2)
+        self.assertEqual(by_key["url"].token_estimate, 200)
+        self.assertEqual(by_key["summary"].chunk_count, 1)
+
+    def test_sorted_by_token_estimate_descending(self) -> None:
+        from packer.pipeline import corpus_heading_summary
+
+        previews = {
+            "a.json": self.preview("small", tokens=10),
+            "b.json": self.preview("big", "big", tokens=500),
+        }
+        summaries = corpus_heading_summary(previews)
+        self.assertEqual(summaries[0].heading, "big")
+
+    def test_headingless_chunks_group_under_empty_string(self) -> None:
+        from packer.pipeline import corpus_heading_summary
+
+        previews = {"a.txt": self.preview("", "", "intro")}
+        summaries = corpus_heading_summary(previews)
+        unnamed = next(s for s in summaries if not s.heading)
+        self.assertEqual(unnamed.chunk_count, 2)
+
+
 class ChunkingGuidanceTests(unittest.TestCase):
     @staticmethod
     def preview(token_sizes: list[int], headings_per_chunk: int = 0) -> DocumentChunkPreview:
