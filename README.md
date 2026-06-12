@@ -171,6 +171,8 @@ Arguments:
 | `--project-name` | Optional project name. Defaults to the source folder name. |
 | `--include-extensions` | Comma-separated list, for example `.md,.txt,.html,.pdf`. |
 | `--exclude-dirs` | Comma-separated list of directory names to skip, added to the defaults. |
+| `--profile` | Run with a saved profile or built-in template, by name. Supplies source/target/mode and the full chunking configuration; other flags override its values, and `source_dir`, `--target`, and `--mode` become optional. |
+| `--profiles-dir` | Directory to load saved profiles from. Default: `~\.llm_project_packer\profiles`. |
 
 Examples:
 
@@ -180,7 +182,15 @@ python .\pack_project.py ".\docs" --target chatgpt --mode lean --include-extensi
 python .\pack_project.py ".\kb" --target rag --mode balanced
 python .\pack_project.py ".\big_corpus" --target generic --mode full --max-bundle-tokens 50000
 python .\pack_project.py ".\manuals" --target cowork --mode balanced
+python .\pack_project.py ".\kb" --profile "RAG Ready Export"
 ```
+
+`--profile` accepts the name of a profile saved by the Streamlit UI (from
+`~\.llm_project_packer\profiles\`) or one of the built-in templates
+(`ChatGPT Balanced Project`, `Claude Full Project`, `Visual Repair Manual`,
+`RAG Ready Export`, `Lean One-Shot Chat`). A profile saved in the UI —
+including chunk size, chunking strategy, heading level, corpus chunk rules,
+and excluded files — re-runs identically from the CLI.
 
 The CLI and UI both use the shared backend:
 

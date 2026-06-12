@@ -237,6 +237,20 @@ Already shipped:
   - Forward-compat: unknown JSON keys are dropped on load, a
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
+- CLI profile support (a documented CLI addition under repository rule 2;
+  behavior without `--profile` is unchanged, including error messages and
+  exit codes): `pack_project.py --profile <name>` loads a saved profile
+  from `~/.llm_project_packer/profiles/` (falling back to built-in template
+  names), builds kwargs via `Profile.to_packaging_kwargs(...)`, and runs
+  `run_packaging_job(...)` — so a profile saved in the UI, including the
+  full chunking configuration (chunk size, strategy, heading level, corpus
+  chunk rules) and `exclude_files`, re-runs identically from the CLI. With
+  `--profile`, `source_dir`, `--target`, and `--mode` become optional and
+  fall back to profile values; explicit flags still override the profile,
+  and `--exclude-dirs` adds to the profile's list. `--profiles-dir <path>`
+  redirects profile storage (mirroring the `profiles_dir` parameter on the
+  profile API). An unknown profile name fails with exit code 2 and lists
+  the available saved and built-in names.
 - JSON file support in `packer/presets.py` and `packer/readers.py`:
   `.json` classifies as file type `json` and `_read_json` renders objects
   as Markdown with one heading per key (top level `##`, nested objects one
@@ -246,8 +260,9 @@ Already shipped:
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
   `test_pipeline.py` (27 cases), `test_chunking.py` (26 cases),
-  `test_readers.py` (6 cases), `test_profiles.py` (31 cases), and
-  `test_bundler.py` (4 cases) — 94 in total; passes with
+  `test_readers.py` (6 cases), `test_profiles.py` (31 cases),
+  `test_cli.py` (11 cases), and
+  `test_bundler.py` (4 cases) — 105 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -393,6 +408,11 @@ python pack_project.py .\sample_input --target cowork  --mode balanced --output 
 python pack_project.py                                              # prints help + clear error, exit code 2
 python pack_project.py .\sample_input --target chatgpt              # argparse error: --mode required
 python pack_project.py .\does\not\exist --target chatgpt --mode balanced  # config error, exit code 2
+
+# Profile-driven CLI runs
+python pack_project.py .\sample_input --profile "RAG Ready Export" --output .\test_output   # rag/balanced with 800-token chunks from the template
+python pack_project.py .\sample_input --profile "RAG Ready Export" --target generic --mode lean --output .\test_output  # flags override the profile
+python pack_project.py .\sample_input --profile "No Such Profile"  # error listing saved + built-in names, exit code 2
 ```
 
 UI smoke checks for the scan/review screens:

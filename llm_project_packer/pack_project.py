@@ -2,16 +2,18 @@
 
 Usage:
     python pack_project.py ./source_files --target chatgpt --mode balanced
+    python pack_project.py ./source_files --profile "RAG Ready Export"
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
-from packer import presets
+from packer import presets, profiles
 from packer.config import PackerConfig
 from packer.pipeline import (
     PackResult,
@@ -53,31 +55,36 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  python pack_project.py ./sample_input --target chatgpt --mode balanced\n"
             "  python pack_project.py ./docs --target claude --mode lean\n"
-            "  python pack_project.py ./kb --target rag --mode balanced"
+            "  python pack_project.py ./kb --target rag --mode balanced\n"
+            '  python pack_project.py ./kb --profile "RAG Ready Export"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "source_dir",
         type=Path,
-        help="Folder of source files to scan recursively.",
+        nargs="?",
+        default=None,
+        help="Folder of source files to scan recursively. Optional when "
+        "--profile supplies a default source folder.",
     )
     parser.add_argument(
         "--target",
         choices=presets.TARGETS,
-        required=True,
-        help="Output target.",
+        default=None,
+        help="Output target. Required unless --profile is given.",
     )
     parser.add_argument(
         "--mode",
         choices=presets.MODES,
-        required=True,
-        help="Packaging mode (controls token budget per bundle).",
+        default=None,
+        help="Packaging mode (controls token budget per bundle). "
+        "Required unless --profile is given.",
     )
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("./llm_project_exports"),
+        default=None,
         help="Output directory (default: ./llm_project_exports).",
     )
     parser.add_argument(
@@ -104,7 +111,41 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Comma-separated list of directory names to skip. Adds to the built-in defaults.",
     )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Run with a saved profile (from ~/.llm_project_packer/profiles/) "
+        "or a built-in template, by name. The profile supplies source/target/"
+        "mode/chunking settings; explicit flags override its values.",
+    )
+    parser.add_argument(
+        "--profiles-dir",
+        type=Path,
+        default=None,
+        help="Directory to load saved profiles from "
+        "(default: ~/.llm_project_packer/profiles).",
+    )
     return parser
+
+
+def enforce_required_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Replicate argparse's missing-required errors when no profile is given.
+
+    ``source_dir``, ``--target``, and ``--mode`` are only optional in the
+    parser so that ``--profile`` can supply them; without a profile they stay
+    required with the same error message and exit code as before.
+    """
+    if args.profile:
+        return
+    missing = []
+    if args.source_dir is None:
+        missing.append("source_dir")
+    if args.target is None:
+        missing.append("--target")
+    if args.mode is None:
+        missing.append("--mode")
+    if missing:
+        parser.error("the following arguments are required: " + ", ".join(missing))
 
 
 def build_config_from_args(args: argparse.Namespace) -> PackerConfig:
@@ -117,7 +158,7 @@ def build_config_from_args(args: argparse.Namespace) -> PackerConfig:
 
     cfg = PackerConfig(
         source_dir=source_dir,
-        output_dir=args.output.expanduser().resolve(),
+        output_dir=(args.output or Path("./llm_project_exports")).expanduser().resolve(),
         target=args.target,
         mode=args.mode,
         project_name=project_name,
@@ -127,6 +168,53 @@ def build_config_from_args(args: argparse.Namespace) -> PackerConfig:
     )
     cfg.validate()
     return cfg
+
+
+def _load_cli_profile(name: str, profiles_dir: Path | None) -> profiles.Profile:
+    try:
+        return profiles.load_profile(name, profiles_dir=profiles_dir)
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Profile {name!r} is not valid JSON: {exc}") from exc
+    try:
+        return profiles.get_built_in_profile(name)
+    except KeyError:
+        saved = profiles.list_profiles(profiles_dir=profiles_dir)
+        raise ValueError(
+            f"Unknown profile {name!r}. "
+            f"Saved profiles: {', '.join(saved) if saved else '(none)'}. "
+            f"Built-in templates: {', '.join(profiles.list_built_in_profiles())}."
+        ) from None
+
+
+def build_job_kwargs_from_profile(args: argparse.Namespace) -> Dict[str, Any]:
+    """Resolve ``--profile`` plus CLI overrides into ``run_packaging_job`` kwargs."""
+    profile = _load_cli_profile(args.profile, args.profiles_dir)
+    kwargs = profile.to_packaging_kwargs(
+        source_dir=args.source_dir,
+        output_dir=args.output,
+        project_name=args.project_name,
+    )
+    if args.target:
+        kwargs["target"] = args.target
+    if args.mode:
+        kwargs["mode"] = args.mode
+    if args.max_bundle_tokens:
+        kwargs["max_bundle_tokens"] = args.max_bundle_tokens
+    include_exts = _parse_extensions(args.include_extensions)
+    if include_exts:
+        kwargs["include_extensions"] = include_exts
+    extra_exclude = _parse_csv_list(args.exclude_dirs)
+    if extra_exclude:
+        existing = tuple(kwargs.get("exclude_dirs") or ())
+        kwargs["exclude_dirs"] = tuple(set(existing) | set(extra_exclude))
+    source_dir = Path(kwargs["source_dir"]).expanduser().resolve()
+    if not source_dir.exists() or not source_dir.is_dir():
+        raise ValueError(
+            f"Source directory does not exist or is not a directory: {source_dir}"
+        )
+    return kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -163,13 +251,21 @@ def main(argv=None) -> int:
         )
         return 2
     args = parser.parse_args(argv)
+    enforce_required_args(parser, args)
     try:
-        cfg = build_config_from_args(args)
+        if args.profile:
+            job_kwargs = build_job_kwargs_from_profile(args)
+            cfg = None
+        else:
+            cfg = build_config_from_args(args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
-        run(cfg)
+        if cfg is None:
+            run_packaging_job(**job_kwargs, progress_callback=_print_progress)
+        else:
+            run(cfg)
     except KeyboardInterrupt:
         print("\nAborted.", file=sys.stderr)
         return 130
