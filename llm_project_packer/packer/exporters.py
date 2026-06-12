@@ -299,9 +299,9 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         "",
         "Chunks are split greedily by paragraph against the per-chunk token budget "
         "(or at headings when the heading strategy is selected). Chunk size, strategy, "
-        "overlap between adjacent chunks, and a minimum chunk size that merges tiny "
-        "chunks are all configurable in the chunk review screen and saved profiles. "
-        "If you want sentence-level splitting, pre-process `chunks.jsonl` before embedding.",
+        "overlap between adjacent chunks, a minimum chunk size that merges tiny "
+        "chunks, and sentence-level splitting of oversize lines are all configurable "
+        "in the chunk review screen and saved profiles.",
         "",
         "## Optimizing this export for retrieval",
         "",
@@ -353,15 +353,16 @@ def write_rag_export(
     heading_level: int = DEFAULT_HEADING_LEVEL,
     min_chunk_tokens: int = 0,
     overlap_tokens: int = 0,
+    split_sentences: bool = False,
 ) -> None:
     """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``.
 
     The defaults preserve V1 output exactly. Callers that ran chunk review
-    can pass ``chunk_strategy``/``heading_level``/``min_chunk_tokens`` so the
-    JSONL chunk boundaries match what the user previewed.
-    ``overlap_tokens > 0`` additionally prefixes each chunk with the tail of
-    its predecessor (boundaries and chunk count are unchanged; only the
-    exported text gains the overlap).
+    can pass ``chunk_strategy``/``heading_level``/``min_chunk_tokens``/
+    ``split_sentences`` so the JSONL chunk boundaries match what the user
+    previewed. ``overlap_tokens > 0`` additionally prefixes each chunk with
+    the tail of its predecessor (boundaries and chunk count are unchanged;
+    only the exported text gains the overlap).
     """
     rag_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = rag_dir / "chunks.jsonl"
@@ -393,10 +394,10 @@ def write_rag_export(
 
             if chunk_strategy == STRATEGY_HEADINGS:
                 pairs = chunk_markdown_by_headings_with_reasons(
-                    text, max_chunk_tokens, heading_level
+                    text, max_chunk_tokens, heading_level, split_sentences
                 )
             else:
-                pairs = chunk_markdown_with_reasons(text, max_chunk_tokens)
+                pairs = chunk_markdown_with_reasons(text, max_chunk_tokens, split_sentences)
             pairs = merge_undersized_chunks(pairs, min_chunk_tokens, max_chunk_tokens)
             chunk_texts = apply_chunk_overlap(
                 [chunk_text for chunk_text, _ in pairs], overlap_tokens

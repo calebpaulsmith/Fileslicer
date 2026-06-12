@@ -84,6 +84,7 @@ def run_packaging_job(
     chunk_exclude_headings: Optional[Sequence[str]] = None,
     chunk_min_tokens: int = 0,
     chunk_overlap_tokens: int = 0,
+    chunk_split_sentences: bool = False,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -121,7 +122,11 @@ def run_packaging_job(
     rules, and the ``rag``/``cowork`` JSONL. ``chunk_overlap_tokens`` (0
     disables) applies only to ``rag_ready/chunks.jsonl``: each chunk is
     prefixed with the tail of its predecessor without moving boundaries, so
-    chunk indices and selections are unaffected.
+    chunk indices and selections are unaffected. ``chunk_split_sentences``
+    (default off) splits single lines larger than the chunk budget at
+    sentence, then word, boundaries instead of emitting over-budget chunks;
+    like ``chunk_min_tokens`` it changes boundaries and applies everywhere
+    documents are chunked.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -154,6 +159,7 @@ def run_packaging_job(
         chunk_exclude_headings=chunk_exclude_headings,
         chunk_min_tokens=chunk_min_tokens,
         chunk_overlap_tokens=chunk_overlap_tokens,
+        chunk_split_sentences=chunk_split_sentences,
         progress_callback=progress_callback,
     )
 
@@ -170,6 +176,7 @@ def run_packaging_config(
     chunk_exclude_headings: Optional[Sequence[str]] = None,
     chunk_min_tokens: int = 0,
     chunk_overlap_tokens: int = 0,
+    chunk_split_sentences: bool = False,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -264,6 +271,7 @@ def run_packaging_config(
             chunk_strategy=chunk_strategy,
             chunk_heading_level=chunk_heading_level,
             chunk_min_tokens=chunk_min_tokens,
+            chunk_split_sentences=chunk_split_sentences,
             source_dir=cfg.source_dir,
             warnings=warnings,
             emit=emit,
@@ -318,6 +326,7 @@ def run_packaging_config(
             heading_level=chunk_heading_level,
             min_chunk_tokens=chunk_min_tokens,
             overlap_tokens=chunk_overlap_tokens,
+            split_sentences=chunk_split_sentences,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
         if cfg.target == "cowork":
@@ -433,6 +442,7 @@ def _apply_chunk_selections(
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     chunk_min_tokens: int = 0,
+    chunk_split_sentences: bool = False,
     source_dir: Path,
     warnings: List[str],
     emit: Callable[..., None],
@@ -458,6 +468,7 @@ def _apply_chunk_selections(
                         chunk_strategy=chunk_strategy,
                         chunk_heading_level=chunk_heading_level,
                         chunk_min_tokens=chunk_min_tokens,
+                        chunk_split_sentences=chunk_split_sentences,
                         warnings=warnings,
                         emit=emit,
                     )
@@ -473,6 +484,7 @@ def _apply_chunk_selections(
             strategy=chunk_strategy,
             heading_level=chunk_heading_level,
             min_tokens=chunk_min_tokens,
+            split_sentences=chunk_split_sentences,
         )
         if not requested:
             doc.entry.status = "skipped"
@@ -535,6 +547,7 @@ def _apply_heading_rules(
     chunk_strategy: str,
     chunk_heading_level: int,
     chunk_min_tokens: int = 0,
+    chunk_split_sentences: bool = False,
     warnings: List[str],
     emit: Callable[..., None],
 ) -> List[ConvertedDoc]:
@@ -544,6 +557,7 @@ def _apply_heading_rules(
         strategy=chunk_strategy,
         heading_level=chunk_heading_level,
         min_tokens=chunk_min_tokens,
+        split_sentences=chunk_split_sentences,
     )
     kept_chunks: List[Chunk] = []
     excluded = 0
@@ -610,6 +624,7 @@ def preview_document_chunks(
     chunk_strategy: str = STRATEGY_TOKENS,
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL,
     chunk_min_tokens: int = 0,
+    chunk_split_sentences: bool = False,
 ) -> DocumentChunkPreview:
     """Convert one file in a temporary workspace and return its chunk preview.
 
@@ -637,6 +652,7 @@ def preview_document_chunks(
             strategy=chunk_strategy,
             heading_level=chunk_heading_level,
             min_tokens=chunk_min_tokens,
+            split_sentences=chunk_split_sentences,
         ),
     )
 
@@ -710,8 +726,9 @@ def chunking_guidance(
         tips.append(
             f"{over_budget} chunk(s) exceed the {max_chunk_tokens:,}-token budget "
             "because a single line (often a table or one-line paragraph) cannot "
-            "be split. Raise the chunk size to absorb them, or accept them "
-            "knowingly — for RAG they reduce retrieval precision."
+            "be split. Enable sentence splitting for oversize lines, raise the "
+            "chunk size to absorb them, or accept them knowingly — for RAG "
+            "they reduce retrieval precision."
         )
 
     heading_count = sum(

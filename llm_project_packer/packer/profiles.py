@@ -55,6 +55,7 @@ ACTIVE_FIELDS: Sequence[str] = (
     "chunk_heading_level",
     "chunk_min_tokens",
     "chunk_overlap_tokens",
+    "chunk_split_sentences",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -94,6 +95,7 @@ class Profile:
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL
     chunk_min_tokens: int = 0
     chunk_overlap_tokens: int = 0
+    chunk_split_sentences: bool = False
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -208,6 +210,7 @@ class Profile:
             "chunk_heading_level": int(self.chunk_heading_level),
             "chunk_min_tokens": int(self.chunk_min_tokens),
             "chunk_overlap_tokens": int(self.chunk_overlap_tokens),
+            "chunk_split_sentences": bool(self.chunk_split_sentences),
         }
         return kwargs
 

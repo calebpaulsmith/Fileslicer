@@ -400,6 +400,51 @@ class PipelineTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_rag_export_splits_oversize_lines_at_sentences(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            long_line = " ".join(["A sentence about spare parts and torque."] * 30)
+            (source / "doc.md").write_text(long_line + "\n", encoding="utf-8")
+
+            default = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=50,
+            )
+            default_lines = (
+                (default.export_dir / "rag_ready" / "chunks.jsonl")
+                .read_text(encoding="utf-8")
+                .strip()
+                .splitlines()
+            )
+            self.assertEqual(len(default_lines), 1)
+            self.assertGreater(json.loads(default_lines[0])["token_estimate"], 50)
+
+            split = run_packaging_job(
+                source,
+                output,
+                target="rag",
+                mode="balanced",
+                chunk_token_budget=50,
+                chunk_split_sentences=True,
+            )
+            split_lines = (
+                (split.export_dir / "rag_ready" / "chunks.jsonl")
+                .read_text(encoding="utf-8")
+                .strip()
+                .splitlines()
+            )
+            self.assertGreater(len(split_lines), 1)
+            for line in split_lines:
+                self.assertLessEqual(json.loads(line)["token_estimate"], 50)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_chunk_selection_uses_merged_boundaries(self) -> None:
         root = self.make_tempdir()
         try:

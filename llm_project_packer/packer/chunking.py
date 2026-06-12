@@ -24,6 +24,7 @@ REASON_END_OF_DOCUMENT = "end of document"
 REASON_HEADING_SECTION = "section starts at a heading"
 REASON_PREAMBLE = "content before the first heading"
 REASON_MERGED_SMALL = "undersized chunk merged into its neighbor"
+REASON_SENTENCE_SPLIT = "oversize line split at sentence boundaries"
 
 STRATEGY_TOKENS = "tokens"
 STRATEGY_HEADINGS = "headings"
@@ -33,6 +34,7 @@ DEFAULT_HEADING_LEVEL = 2
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 @dataclass(frozen=True)
@@ -73,17 +75,26 @@ class Chunk:
         return ""
 
 
-def chunk_markdown(text: str, max_tokens: int) -> List[str]:
+def chunk_markdown(
+    text: str, max_tokens: int, split_sentences: bool = False
+) -> List[str]:
     """Split text into chunks at paragraph boundaries within a token budget.
 
     Paragraphs are joined into a chunk while the running token estimate stays
     under ``max_tokens``. Paragraphs that exceed the budget on their own are
     further split by lines so we never emit silently-truncated content.
+    ``split_sentences`` additionally splits single lines larger than the
+    budget at sentence (then word) boundaries.
     """
-    return [chunk_text for chunk_text, _ in chunk_markdown_with_reasons(text, max_tokens)]
+    return [
+        chunk_text
+        for chunk_text, _ in chunk_markdown_with_reasons(text, max_tokens, split_sentences)
+    ]
 
 
-def chunk_markdown_with_reasons(text: str, max_tokens: int) -> List[Tuple[str, str]]:
+def chunk_markdown_with_reasons(
+    text: str, max_tokens: int, split_sentences: bool = False
+) -> List[Tuple[str, str]]:
     """Chunk like :func:`chunk_markdown` and pair each chunk with the reason
     its boundary was drawn (one of the module-level ``REASON_*`` constants)."""
     if max_tokens <= 0:
@@ -106,10 +117,7 @@ def chunk_markdown_with_reasons(text: str, max_tokens: int) -> List[Tuple[str, s
                 buffer = []
                 buffer_tokens = 0
             # Split the oversize paragraph by lines.
-            chunks.extend(
-                (piece, REASON_OVERSIZE_SPLIT)
-                for piece in _split_oversize_paragraph(para, max_tokens)
-            )
+            chunks.extend(_split_oversize_paragraph(para, max_tokens, split_sentences))
             continue
 
         if buffer_tokens + para_tokens <= max_tokens:
@@ -133,6 +141,7 @@ def chunk_document(
     strategy: str = STRATEGY_TOKENS,
     heading_level: int = DEFAULT_HEADING_LEVEL,
     min_tokens: int = 0,
+    split_sentences: bool = False,
 ) -> List[Chunk]:
     """Chunk a converted document body into indexed, annotated chunks.
 
@@ -145,15 +154,19 @@ def chunk_document(
 
     ``min_tokens`` is an opt-in floor (0 disables it): chunks smaller than it
     are merged into a neighbor via :func:`merge_undersized_chunks`, including
-    across heading-section boundaries.
+    across heading-section boundaries. ``split_sentences`` opts in to
+    splitting single lines larger than the budget at sentence (then word)
+    boundaries instead of emitting over-budget chunks.
     """
     text = (body_markdown or "").strip()
     if not text:
         return []
     if strategy == STRATEGY_HEADINGS:
-        pairs = chunk_markdown_by_headings_with_reasons(text, max_tokens, heading_level)
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, max_tokens, heading_level, split_sentences
+        )
     else:
-        pairs = chunk_markdown_with_reasons(text, max_tokens)
+        pairs = chunk_markdown_with_reasons(text, max_tokens, split_sentences)
     pairs = merge_undersized_chunks(pairs, min_tokens, max_tokens)
     return [
         Chunk(
@@ -196,6 +209,7 @@ def chunk_markdown_by_headings_with_reasons(
     text: str,
     max_tokens: int,
     heading_level: int = DEFAULT_HEADING_LEVEL,
+    split_sentences: bool = False,
 ) -> List[Tuple[str, str]]:
     """Heading-aligned chunking: one chunk per heading section, with the
     token chunker applied inside sections larger than the budget."""
@@ -203,7 +217,7 @@ def chunk_markdown_by_headings_with_reasons(
     if not sections:
         return []
     if len(sections) == 1 and not _starts_with_heading(sections[0], heading_level):
-        return chunk_markdown_with_reasons(sections[0], max_tokens)
+        return chunk_markdown_with_reasons(sections[0], max_tokens, split_sentences)
 
     pairs: List[Tuple[str, str]] = []
     for section in sections:
@@ -214,7 +228,7 @@ def chunk_markdown_by_headings_with_reasons(
         if max_tokens <= 0 or estimate_tokens(section) <= max_tokens:
             pairs.append((section, section_reason))
         else:
-            pairs.extend(chunk_markdown_with_reasons(section, max_tokens))
+            pairs.extend(chunk_markdown_with_reasons(section, max_tokens, split_sentences))
     return pairs
 
 
@@ -333,22 +347,71 @@ def match_heading_patterns(heading: str, patterns: Sequence[str]) -> Tuple[str, 
     )
 
 
-def _split_oversize_paragraph(para: str, max_tokens: int) -> List[str]:
-    """Last-ditch line-level split for paragraphs that exceed the chunk budget."""
-    lines = para.split("\n")
-    chunks: List[str] = []
+def _split_oversize_paragraph(
+    para: str, max_tokens: int, split_sentences: bool = False
+) -> List[Tuple[str, str]]:
+    """Last-ditch line-level split for paragraphs that exceed the chunk budget.
+
+    A single line larger than the budget normally stays whole (an over-budget
+    chunk the audit warns about); with ``split_sentences`` it is split at
+    sentence, then word, boundaries and tagged ``REASON_SENTENCE_SPLIT``.
+    """
+    pairs: List[Tuple[str, str]] = []
     buffer: List[str] = []
     buffer_tokens = 0
-    for line in lines:
+    for line in para.split("\n"):
         line_tokens = estimate_tokens(line)
+        if split_sentences and line_tokens > max_tokens:
+            if buffer:
+                pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
+                buffer = []
+                buffer_tokens = 0
+            pairs.extend(
+                (piece, REASON_SENTENCE_SPLIT)
+                for piece in _split_oversize_line(line, max_tokens)
+            )
+            continue
         if buffer_tokens + line_tokens <= max_tokens:
             buffer.append(line)
             buffer_tokens += line_tokens
         else:
             if buffer:
-                chunks.append("\n".join(buffer))
+                pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
             buffer = [line]
             buffer_tokens = line_tokens
     if buffer:
-        chunks.append("\n".join(buffer))
-    return chunks
+        pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
+    return pairs
+
+
+def _split_oversize_line(line: str, max_tokens: int) -> List[str]:
+    """Split one oversize line at sentence boundaries, falling back to words.
+
+    Sentence detection is the naive ``(?<=[.!?])\\s+`` regex, so
+    abbreviations like "e.g." can split early — acceptable for chunk
+    boundaries. A sentence larger than the budget is broken into words; a
+    single word larger than the budget stays whole.
+    """
+    units: List[str] = []
+    for sentence in _SENTENCE_BOUNDARY_RE.split(line):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if estimate_tokens(sentence) > max_tokens:
+            units.extend(sentence.split())
+        else:
+            units.append(sentence)
+    pieces: List[str] = []
+    buffer: List[str] = []
+    for unit in units:
+        if buffer:
+            # Estimate the joined text, not the sum of parts, so separator
+            # overhead cannot push a piece over the budget.
+            if estimate_tokens(" ".join((*buffer, unit))) > max_tokens:
+                pieces.append(" ".join(buffer))
+                buffer = [unit]
+                continue
+        buffer.append(unit)
+    if buffer:
+        pieces.append(" ".join(buffer))
+    return pieces

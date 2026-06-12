@@ -81,11 +81,13 @@ UI flow:
    The audit's `Heading browser` lists every distinct chunk heading with
    chunk/token counts so you can build those rules by ticking checkboxes
    instead of typing patterns. An optional minimum chunk size merges tiny
-   boilerplate chunks into a neighbor (never past the chunk size), and an
+   boilerplate chunks into a neighbor (never past the chunk size), an
    optional chunk overlap prefixes each `rag_ready/chunks.jsonl` chunk
    with the tail of the previous one for better retrieval recall —
    overlap changes only the exported text, not chunk boundaries or
-   selections. Documents without a chunk selection export
+   selections — and an optional sentence-splitting toggle breaks single
+   lines larger than the chunk size at sentence boundaries instead of
+   emitting over-budget chunks. Documents without a chunk selection export
    in full; trimmed documents are noted in the manifest.
 6. Adjust packaging settings, including the optional max-token override and
    projected bundle count.
@@ -99,9 +101,10 @@ UI flow:
 Profiles are saved to `~/.llm_project_packer/profiles/`, the same location
 used by the profile API. A profile captures the full chunking configuration
 — chunk size, strategy, heading level, minimum chunk size, chunk overlap,
-and corpus chunk rules — plus the file review selection (excluded files
-re-apply on the next scan), alongside the packaging settings. The
-`RAG Ready Export` built-in defaults to retrieval-sized 800-token chunks.
+sentence splitting for oversize lines, and corpus chunk rules — plus the
+file review selection (excluded files re-apply on the next scan), alongside
+the packaging settings. The `RAG Ready Export` built-in defaults to
+retrieval-sized 800-token chunks.
 
 ## What It Does
 
@@ -195,8 +198,8 @@ python .\pack_project.py ".\kb" --profile "RAG Ready Export"
 (`ChatGPT Balanced Project`, `Claude Full Project`, `Visual Repair Manual`,
 `RAG Ready Export`, `Lean One-Shot Chat`). A profile saved in the UI —
 including chunk size, chunking strategy, heading level, minimum chunk size,
-chunk overlap, corpus chunk rules, and excluded files — re-runs identically
-from the CLI.
+chunk overlap, sentence splitting, corpus chunk rules, and excluded files —
+re-runs identically from the CLI.
 
 The CLI and UI both use the shared backend:
 

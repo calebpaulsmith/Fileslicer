@@ -14,6 +14,7 @@ from packer.chunking import (  # noqa: E402
     REASON_MERGED_SMALL,
     REASON_OVERSIZE_SPLIT,
     REASON_PREAMBLE,
+    REASON_SENTENCE_SPLIT,
     REASON_WHOLE_DOCUMENT,
     STRATEGY_HEADINGS,
     Chunk,
@@ -281,6 +282,63 @@ class MergeUndersizedChunksTests(unittest.TestCase):
         self.assertEqual(with_min[0].boundary_reason, REASON_MERGED_SMALL)
         self.assertIn("tiny", with_min[0].text)
         self.assertIn("delta", with_min[0].text)
+
+
+class SentenceSplitTests(unittest.TestCase):
+    LONG_LINE = " ".join(["This is sentence number one."] * 12)
+
+    def test_default_keeps_oversize_line_whole(self) -> None:
+        pairs = chunk_markdown_with_reasons(self.LONG_LINE, 20)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0], (self.LONG_LINE, REASON_OVERSIZE_SPLIT))
+
+    def test_split_sentences_breaks_oversize_line_within_budget(self) -> None:
+        pairs = chunk_markdown_with_reasons(self.LONG_LINE, 20, split_sentences=True)
+        self.assertGreater(len(pairs), 1)
+        for text, reason in pairs:
+            self.assertEqual(reason, REASON_SENTENCE_SPLIT)
+            self.assertLessEqual(estimate_tokens(text), 20)
+        self.assertEqual(" ".join(text for text, _ in pairs), self.LONG_LINE)
+
+    def test_sentence_without_punctuation_falls_back_to_words(self) -> None:
+        line = " ".join(["word"] * 200)
+        pairs = chunk_markdown_with_reasons(line, 10, split_sentences=True)
+        self.assertGreater(len(pairs), 1)
+        for text, reason in pairs:
+            self.assertEqual(reason, REASON_SENTENCE_SPLIT)
+            self.assertLessEqual(estimate_tokens(text), 10)
+        self.assertEqual(" ".join(text for text, _ in pairs), line)
+
+    def test_single_giant_word_stays_whole(self) -> None:
+        line = "x" * 400
+        pairs = chunk_markdown_with_reasons(line, 10, split_sentences=True)
+        self.assertEqual(pairs, [(line, REASON_SENTENCE_SPLIT)])
+
+    def test_normal_lines_in_oversize_paragraph_keep_line_splitting(self) -> None:
+        para = "\n".join([_paragraph("echo", 10)] * 8)
+        default_pairs = chunk_markdown_with_reasons(para, 30)
+        sentence_pairs = chunk_markdown_with_reasons(para, 30, split_sentences=True)
+        self.assertEqual(default_pairs, sentence_pairs)
+        self.assertTrue(
+            all(reason == REASON_OVERSIZE_SPLIT for _, reason in sentence_pairs)
+        )
+
+    def test_chunk_document_honors_split_sentences(self) -> None:
+        without = chunk_document(self.LONG_LINE, 20)
+        self.assertEqual(len(without), 1)
+        with_split = chunk_document(self.LONG_LINE, 20, split_sentences=True)
+        self.assertGreater(len(with_split), 1)
+        self.assertEqual(with_split[0].boundary_reason, REASON_SENTENCE_SPLIT)
+
+    def test_heading_strategy_passes_split_sentences_into_sections(self) -> None:
+        text = f"## Long\n\n{self.LONG_LINE}"
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, 20, heading_level=2, split_sentences=True
+        )
+        self.assertGreater(len(pairs), 1)
+        self.assertTrue(
+            any(reason == REASON_SENTENCE_SPLIT for _, reason in pairs)
+        )
 
 
 class ApplyChunkOverlapTests(unittest.TestCase):

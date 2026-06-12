@@ -217,6 +217,23 @@ Already shipped:
   the chunk-splitting paragraph in `00_RAG_EXPORT_NOTES.md` now describes
   the configurable strategy/overlap/minimum instead of telling users to
   pre-process for overlap.
+- Sentence splitting for oversize lines (profile-bound active field
+  `Profile.chunk_split_sentences`, default off = byte-identical): a single
+  line larger than the chunk budget — the source of every over-budget
+  chunk warning — is split at sentence boundaries (naive
+  `(?<=[.!?])\s+`, so abbreviations like "e.g." may split early), falling
+  back to word boundaries; a single word larger than the budget still
+  stays whole. Pieces carry boundary reason
+  `chunking.REASON_SENTENCE_SPLIT` and are packed against the estimate of
+  the joined text so separator overhead cannot push a piece over the
+  budget. Like `chunk_min_tokens` it changes boundaries, so it applies
+  everywhere documents are chunked and changing it clears chunk
+  selections; it is a checkbox in chunk review, flows through
+  `run_packaging_job(chunk_split_sentences=...)`, and re-runs from the
+  CLI via `--profile`. The over-budget guidance tip now suggests it.
+  Documented generated-file change: the `00_RAG_EXPORT_NOTES.md`
+  chunk-splitting paragraph lists sentence splitting as configurable
+  instead of suggesting pre-processing.
 - Profile-bound file review selection: `Profile.exclude_files` (active
   field) holds case-insensitive glob patterns matched by
   `scanner.match_path_patterns` against source-relative POSIX paths.
@@ -232,7 +249,7 @@ Already shipped:
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (23 fields total) + `save_profile`,
+  - `Profile` dataclass (24 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -241,12 +258,13 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the fifteen fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the sixteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
-    `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`).
+    `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
+    `chunk_split_sentences`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -281,10 +299,10 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (30 cases), `test_chunking.py` (38 cases),
+  `test_pipeline.py` (31 cases), `test_chunking.py` (45 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (33 cases),
   `test_cli.py` (11 cases), and
-  `test_bundler.py` (4 cases) — 122 in total; passes with
+  `test_bundler.py` (4 cases) — 130 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -514,6 +532,13 @@ Manual Streamlit inputs and expected outputs:
   predecessor, chunk counts and ids match the preview (previews show
   chunks without the overlap text), and changing the overlap does not
   clear chunk selections.
+- Tick `Split oversize lines at sentences`, preview a document containing
+  a single line larger than the chunk size (e.g., a one-line paragraph
+  from a converted PDF or JSON field).
+  Expected: the over-budget chunk disappears, replaced by chunks within
+  budget with boundary reason `oversize line split at sentence
+  boundaries`; the corpus audit's over-budget warning clears; changing
+  the checkbox clears selections like a chunk-size change.
 - In `Corpus chunking audit` with the heading strategy, open the
   `Heading browser` after analyzing.
   Expected: one row per distinct chunk heading with chunk/token/document
