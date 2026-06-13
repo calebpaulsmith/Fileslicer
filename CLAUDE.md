@@ -23,6 +23,44 @@ user choose the right packaging strategy for the job:
 - research/data projects should preserve titles, tables, units, dates,
   spreadsheet structure, and source provenance.
 
+### Direction update (2026-06, pending deep-research validation)
+
+The product owner has sharpened the vision; these goals override the narrower
+framing above where they conflict, and the specifics are pending a deep-research
+pass on how each destination platform ingests and retrieves documents:
+
+- **Organize data optimally for whatever product the user is building.** The
+  tool's job is to produce the best possible packaging — bundles, chunks,
+  heading/structure selections — for the specific destination, not to expose a
+  pile of toggles the user must understand. "Best solution no matter what
+  product is being built" is the bar.
+- **Self-hosted / embedding-model RAG is a PRIMARY use case**, co-equal with
+  hosted projects — not the "future local RAG workflows" afterthought it was
+  treated as. Chunking quality for a user-owned embedding model (including
+  basic/small models) is first-class.
+- **Destination platforms to support and advise on** now explicitly include:
+  self-hosted RAG with a user-owned embedding model; Claude Projects; OpenAI
+  ChatGPT, including enterprise/government ChatGPT workspace deployments (e.g.
+  the "DHS chat" workspace, currently on GPT-5.1 and upgrading to ~5.4);
+  Microsoft Azure Databricks **Genie** (conversational analytics over lakehouse
+  tables — structured data, so packaging means table structure, column
+  descriptions, and metadata rather than prose chunking); and the Databricks /
+  Azure **Knowledge Assistant** (RAG over unstructured documents). These are
+  goals, not shipped targets.
+- **A product-aware questionnaire / goal selector** should drive configuration:
+  the tool asks a short triage (what product/destination, structured vs. prose
+  data, who owns retrieval, etc.) and then either auto-defaults the packaging
+  features or directs the user to the right settings — so the user is not left
+  guessing which toggles are effective. This is the intended home for the V3
+  recommendation engine.
+- **Per-feature, cited guidance.** Every chunking/bundling feature (shipped,
+  planned, or proposed) should carry guidance on when it helps, is inert, or
+  backfires for each destination, grounded in researched evidence rather than
+  assertion. A known open question the research must settle: whether external
+  chunking is even effective for hosted projects that re-chunk on their side,
+  or whether bundling + structure preservation + content selection is the only
+  lever that matters there.
+
 The tool stays local. It creates export folders and instructions; the user
 manually uploads the outputs. Do not automate uploads, logins, browser flows,
 or remote hosting.
@@ -382,11 +420,25 @@ just a UI for the packer.
 
 Candidate Version 3 features:
 
-- goal selector: repair manual, FEMA/legal/policy, codebase, research,
+- **product-aware questionnaire / goal selector** (the priority V3 entry per
+  the 2026-06 direction update): a short triage — what destination/product,
+  structured vs. prose data, who owns retrieval, context-window size, citation
+  needs — that maps each answer pattern to a concrete packaging configuration
+  and either auto-defaults the features or directs the user to the right
+  settings. This is the answer to "the user shouldn't have to guess which
+  toggles are effective." Its rule set is to be grounded in the pending
+  deep-research findings on per-destination ingestion/retrieval behavior;
+- goal selector content: repair manual, FEMA/legal/policy, codebase, research,
   data/spreadsheet, reusable project knowledge, one-shot chat;
-- target-platform strategy recommendations for ChatGPT Project, Claude
-  Project, one-off chats, Gemini/large-context tools, NotebookLM-style source
-  sets, local RAG, and API agents;
+- target-platform strategy recommendations for self-hosted embedding-model RAG
+  (primary), Claude Projects, OpenAI ChatGPT (incl. enterprise/government
+  ChatGPT workspaces such as the GPT-5.1→5.4 "DHS chat"), Azure Databricks
+  Genie (structured/lakehouse-table analytics), the Databricks/Azure Knowledge
+  Assistant (document RAG), one-off chats, Gemini/large-context tools,
+  NotebookLM-style source sets, and API agents;
+- per-feature, cited configuration guidance: for every shipped/planned chunking
+  and bundling feature, a per-destination verdict (effective / inert / risky)
+  plus recommended defaults, surfaced to the user at the point of decision;
 - named packaging strategies: Claude-safe bundle, ChatGPT Project bundle,
   one-shot chat bundle, RAG-ready export, visual/manual bundle, human archive;
 - recommendation engine that explains why a strategy fits the source set
