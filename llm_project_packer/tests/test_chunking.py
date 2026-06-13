@@ -10,10 +10,12 @@ sys.path.insert(0, str(PROJECT_DIR))
 from packer.chunking import (  # noqa: E402
     REASON_BUDGET_REACHED,
     REASON_END_OF_DOCUMENT,
+    REASON_FENCE_KEPT,
     REASON_HEADING_SECTION,
     REASON_MERGED_SMALL,
     REASON_OVERSIZE_SPLIT,
     REASON_PREAMBLE,
+    REASON_SENTENCE_SPLIT,
     REASON_WHOLE_DOCUMENT,
     STRATEGY_HEADINGS,
     Chunk,
@@ -23,9 +25,13 @@ from packer.chunking import (  # noqa: E402
     chunk_markdown,
     chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
+    apply_heading_path_prefix,
+    format_heading_path,
+    heading_paths_for_texts,
     match_heading_patterns,
     merge_undersized_chunks,
     split_into_heading_sections,
+    split_paragraphs_fence_aware,
 )
 from packer.token_estimator import estimate_tokens  # noqa: E402
 
@@ -283,6 +289,134 @@ class MergeUndersizedChunksTests(unittest.TestCase):
         self.assertIn("delta", with_min[0].text)
 
 
+class SentenceSplitTests(unittest.TestCase):
+    LONG_LINE = " ".join(["This is sentence number one."] * 12)
+
+    def test_default_keeps_oversize_line_whole(self) -> None:
+        pairs = chunk_markdown_with_reasons(self.LONG_LINE, 20)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0], (self.LONG_LINE, REASON_OVERSIZE_SPLIT))
+
+    def test_split_sentences_breaks_oversize_line_within_budget(self) -> None:
+        pairs = chunk_markdown_with_reasons(self.LONG_LINE, 20, split_sentences=True)
+        self.assertGreater(len(pairs), 1)
+        for text, reason in pairs:
+            self.assertEqual(reason, REASON_SENTENCE_SPLIT)
+            self.assertLessEqual(estimate_tokens(text), 20)
+        self.assertEqual(" ".join(text for text, _ in pairs), self.LONG_LINE)
+
+    def test_sentence_without_punctuation_falls_back_to_words(self) -> None:
+        line = " ".join(["word"] * 200)
+        pairs = chunk_markdown_with_reasons(line, 10, split_sentences=True)
+        self.assertGreater(len(pairs), 1)
+        for text, reason in pairs:
+            self.assertEqual(reason, REASON_SENTENCE_SPLIT)
+            self.assertLessEqual(estimate_tokens(text), 10)
+        self.assertEqual(" ".join(text for text, _ in pairs), line)
+
+    def test_single_giant_word_stays_whole(self) -> None:
+        line = "x" * 400
+        pairs = chunk_markdown_with_reasons(line, 10, split_sentences=True)
+        self.assertEqual(pairs, [(line, REASON_SENTENCE_SPLIT)])
+
+    def test_normal_lines_in_oversize_paragraph_keep_line_splitting(self) -> None:
+        para = "\n".join([_paragraph("echo", 10)] * 8)
+        default_pairs = chunk_markdown_with_reasons(para, 30)
+        sentence_pairs = chunk_markdown_with_reasons(para, 30, split_sentences=True)
+        self.assertEqual(default_pairs, sentence_pairs)
+        self.assertTrue(
+            all(reason == REASON_OVERSIZE_SPLIT for _, reason in sentence_pairs)
+        )
+
+    def test_chunk_document_honors_split_sentences(self) -> None:
+        without = chunk_document(self.LONG_LINE, 20)
+        self.assertEqual(len(without), 1)
+        with_split = chunk_document(self.LONG_LINE, 20, split_sentences=True)
+        self.assertGreater(len(with_split), 1)
+        self.assertEqual(with_split[0].boundary_reason, REASON_SENTENCE_SPLIT)
+
+    def test_heading_strategy_passes_split_sentences_into_sections(self) -> None:
+        text = f"## Long\n\n{self.LONG_LINE}"
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, 20, heading_level=2, split_sentences=True
+        )
+        self.assertGreater(len(pairs), 1)
+        self.assertTrue(
+            any(reason == REASON_SENTENCE_SPLIT for _, reason in pairs)
+        )
+
+
+def _balanced_fences(text: str) -> bool:
+    markers = sum(1 for line in text.split("\n") if line.strip().startswith("```"))
+    return markers % 2 == 0
+
+
+class FenceAwareTests(unittest.TestCase):
+    FENCED_DOC = (
+        f"{_paragraph('intro', 15)}\n\n"
+        "```python\n"
+        f"{_paragraph('code', 15)}\n"
+        "\n"
+        f"{_paragraph('more', 15)}\n"
+        "```\n\n"
+        f"{_paragraph('outro', 15)}"
+    )
+
+    def test_default_chunker_splits_inside_fence(self) -> None:
+        chunks = chunk_markdown(self.FENCED_DOC, 30)
+        self.assertTrue(
+            any(not _balanced_fences(chunk) for chunk in chunks),
+            "expected the fence-blind default to break the code block",
+        )
+
+    def test_fence_aware_never_splits_inside_fence(self) -> None:
+        chunks = chunk_markdown(self.FENCED_DOC, 30, fence_aware=True)
+        self.assertGreater(len(chunks), 1)
+        for chunk in chunks:
+            self.assertTrue(_balanced_fences(chunk), f"broken fence in: {chunk!r}")
+
+    def test_split_paragraphs_keeps_fence_with_blank_line_whole(self) -> None:
+        paragraphs = split_paragraphs_fence_aware(self.FENCED_DOC)
+        self.assertEqual(len(paragraphs), 3)
+        self.assertTrue(paragraphs[1].startswith("```python"))
+        self.assertTrue(paragraphs[1].endswith("```"))
+
+    def test_plain_text_chunks_identically_either_way(self) -> None:
+        text = "\n\n".join([_paragraph("alpha"), _paragraph("bravo"), _paragraph("charlie")])
+        self.assertEqual(
+            chunk_markdown_with_reasons(text, 50),
+            chunk_markdown_with_reasons(text, 50, fence_aware=True),
+        )
+
+    def test_oversize_fence_is_kept_whole_with_reason(self) -> None:
+        fence = "```\n" + "\n".join([_paragraph("big", 12)] * 6) + "\n```"
+        pairs = chunk_markdown_with_reasons(fence, 20, fence_aware=True)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0], (fence, REASON_FENCE_KEPT))
+
+    def test_oversize_fence_is_not_sentence_split(self) -> None:
+        fence = "```\n" + " ".join(["A sentence here."] * 20) + "\n```"
+        pairs = chunk_markdown_with_reasons(
+            fence, 15, split_sentences=True, fence_aware=True
+        )
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(pairs[0][1], REASON_FENCE_KEPT)
+
+    def test_chunk_document_honors_fence_aware(self) -> None:
+        broken = chunk_document(self.FENCED_DOC, 30)
+        self.assertTrue(any(not _balanced_fences(c.text) for c in broken))
+        kept = chunk_document(self.FENCED_DOC, 30, fence_aware=True)
+        self.assertTrue(all(_balanced_fences(c.text) for c in kept))
+
+    def test_heading_strategy_passes_fence_aware_into_sections(self) -> None:
+        text = f"## Code\n\n{self.FENCED_DOC}"
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, 30, heading_level=2, fence_aware=True
+        )
+        for chunk_text, _ in pairs:
+            self.assertTrue(_balanced_fences(chunk_text))
+
+
 class ApplyChunkOverlapTests(unittest.TestCase):
     def test_zero_overlap_returns_input_unchanged(self) -> None:
         chunks = ["one", "two"]
@@ -309,6 +443,59 @@ class ApplyChunkOverlapTests(unittest.TestCase):
     def test_boundary_count_is_preserved(self) -> None:
         chunks = ["one one one", "two two two", "three three three"]
         self.assertEqual(len(apply_chunk_overlap(chunks, 2)), len(chunks))
+
+
+class HeadingPathTests(unittest.TestCase):
+    def test_empty_when_no_headings(self) -> None:
+        paths = heading_paths_for_texts(["plain one", "plain two"])
+        self.assertEqual(paths, [(), ()])
+
+    def test_opening_heading_is_not_in_its_own_path(self) -> None:
+        # A heading that opens a chunk describes that chunk's body (already in
+        # its text); it becomes the breadcrumb for the chunks that follow.
+        paths = heading_paths_for_texts(["# Title\n\nbody", "more body"])
+        self.assertEqual(paths, [(), ("Title",)])
+
+    def test_nested_headings_accumulate_by_level(self) -> None:
+        texts = [
+            "# Manual",
+            "## Transmission",
+            "### Removal\n\nRemove bolts.",
+            "Tighten to spec.",
+        ]
+        paths = heading_paths_for_texts(texts)
+        self.assertEqual(paths[3], ("Manual", "Transmission", "Removal"))
+
+    def test_new_heading_clears_deeper_levels(self) -> None:
+        texts = [
+            "# Manual",
+            "## A\n\n### A1\n\ndetail",
+            "## B\n\nother",
+            "trailing",
+        ]
+        paths = heading_paths_for_texts(texts)
+        # After "## B" the stale "### A1" must be gone.
+        self.assertEqual(paths[3], ("Manual", "B"))
+
+    def test_headings_inside_fences_are_ignored(self) -> None:
+        texts = ["# Real", "```\n# not a heading\n```\n\nbody", "after"]
+        paths = heading_paths_for_texts(texts)
+        self.assertEqual(paths[2], ("Real",))
+
+    def test_format_and_prefix_helpers(self) -> None:
+        self.assertEqual(format_heading_path(()), "")
+        self.assertEqual(format_heading_path(("A", "B")), "A > B")
+        self.assertEqual(apply_heading_path_prefix("body", ()), "body")
+        self.assertEqual(
+            apply_heading_path_prefix("body", ("A", "B")), "A > B\n\nbody"
+        )
+
+    def test_chunk_document_populates_heading_path(self) -> None:
+        text = "# Manual\n\n## Removal\n\n" + _paragraph("step", 40)
+        chunks = chunk_document(text, 30, strategy=STRATEGY_HEADINGS, heading_level=2)
+        deepest = chunks[-1]
+        self.assertIn("Manual", deepest.heading_path)
+        self.assertEqual(deepest.heading_path_display, format_heading_path(deepest.heading_path))
 
 
 if __name__ == "__main__":

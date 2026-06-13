@@ -23,6 +23,44 @@ user choose the right packaging strategy for the job:
 - research/data projects should preserve titles, tables, units, dates,
   spreadsheet structure, and source provenance.
 
+### Direction update (2026-06, pending deep-research validation)
+
+The product owner has sharpened the vision; these goals override the narrower
+framing above where they conflict, and the specifics are pending a deep-research
+pass on how each destination platform ingests and retrieves documents:
+
+- **Organize data optimally for whatever product the user is building.** The
+  tool's job is to produce the best possible packaging — bundles, chunks,
+  heading/structure selections — for the specific destination, not to expose a
+  pile of toggles the user must understand. "Best solution no matter what
+  product is being built" is the bar.
+- **Self-hosted / embedding-model RAG is a PRIMARY use case**, co-equal with
+  hosted projects — not the "future local RAG workflows" afterthought it was
+  treated as. Chunking quality for a user-owned embedding model (including
+  basic/small models) is first-class.
+- **Destination platforms to support and advise on** now explicitly include:
+  self-hosted RAG with a user-owned embedding model; Claude Projects; OpenAI
+  ChatGPT, including enterprise/government ChatGPT workspace deployments (e.g.
+  the "DHS chat" workspace, currently on GPT-5.1 and upgrading to ~5.4);
+  Microsoft Azure Databricks **Genie** (conversational analytics over lakehouse
+  tables — structured data, so packaging means table structure, column
+  descriptions, and metadata rather than prose chunking); and the Databricks /
+  Azure **Knowledge Assistant** (RAG over unstructured documents). These are
+  goals, not shipped targets.
+- **A product-aware questionnaire / goal selector** should drive configuration:
+  the tool asks a short triage (what product/destination, structured vs. prose
+  data, who owns retrieval, etc.) and then either auto-defaults the packaging
+  features or directs the user to the right settings — so the user is not left
+  guessing which toggles are effective. This is the intended home for the V3
+  recommendation engine.
+- **Per-feature, cited guidance.** Every chunking/bundling feature (shipped,
+  planned, or proposed) should carry guidance on when it helps, is inert, or
+  backfires for each destination, grounded in researched evidence rather than
+  assertion. A known open question the research must settle: whether external
+  chunking is even effective for hosted projects that re-chunk on their side,
+  or whether bundling + structure preservation + content selection is the only
+  lever that matters there.
+
 The tool stays local. It creates export folders and instructions; the user
 manually uploads the outputs. Do not automate uploads, logins, browser flows,
 or remote hosting.
@@ -217,6 +255,68 @@ Already shipped:
   the chunk-splitting paragraph in `00_RAG_EXPORT_NOTES.md` now describes
   the configurable strategy/overlap/minimum instead of telling users to
   pre-process for overlap.
+- Sentence splitting for oversize lines (profile-bound active field
+  `Profile.chunk_split_sentences`, default off = byte-identical): a single
+  line larger than the chunk budget — the source of every over-budget
+  chunk warning — is split at sentence boundaries (naive
+  `(?<=[.!?])\s+`, so abbreviations like "e.g." may split early), falling
+  back to word boundaries; a single word larger than the budget still
+  stays whole. Pieces carry boundary reason
+  `chunking.REASON_SENTENCE_SPLIT` and are packed against the estimate of
+  the joined text so separator overhead cannot push a piece over the
+  budget. Like `chunk_min_tokens` it changes boundaries, so it applies
+  everywhere documents are chunked and changing it clears chunk
+  selections; it is a checkbox in chunk review, flows through
+  `run_packaging_job(chunk_split_sentences=...)`, and re-runs from the
+  CLI via `--profile`. The over-budget guidance tip now suggests it.
+  Documented generated-file change: the `00_RAG_EXPORT_NOTES.md`
+  chunk-splitting paragraph lists sentence splitting as configurable
+  instead of suggesting pre-processing.
+- Fence-aware chunking for codebases (profile-bound active field
+  `Profile.chunk_fence_aware`, default off = byte-identical): the token
+  chunker normally splits at every blank line, so a fenced ``` code block
+  containing a blank line can be cut mid-fence, leaving chunks with
+  unbalanced fence markers. With the toggle on,
+  `chunking.split_paragraphs_fence_aware` keeps each fence atomic when
+  splitting paragraphs, `_split_oversize_paragraph` treats a fence as one
+  unbreakable unit, and a fence larger than the chunk budget is emitted
+  whole with boundary reason `chunking.REASON_FENCE_KEPT` (it shows up in
+  the audit's over-budget warning rather than being broken; sentence
+  splitting never applies inside a fence). Intended for codebases and
+  technical Markdown — converted PDFs and office documents rarely contain
+  fences, so it stays off by default and the UI checkbox ("Keep code
+  blocks whole (for codebases)") says so. Like the other
+  boundary-affecting settings it applies everywhere documents are chunked,
+  changing it clears chunk selections, it flows through
+  `run_packaging_job(chunk_fence_aware=...)`, and it re-runs from the CLI
+  via `--profile`. One documented opt-in nuance: whitespace-only lines
+  count as blank when fence-aware splitting is on, where plain
+  `split("\n\n")` does not.
+- Heading-path breadcrumbs for retrieval (profile-bound active field
+  `Profile.chunk_heading_path_mode`, one of
+  `chunking.HEADING_PATH_MODES` = `off`/`metadata`/`prefix`/`both`,
+  default `off` = byte-identical): attaches each `rag`/`cowork` chunk's
+  chain of enclosing headings (outermost first, full depth) to
+  `rag_ready/chunks.jsonl`. `chunking.heading_paths_for_texts` computes
+  paths by walking the ordered chunk texts with a per-level heading stack —
+  a chunk's path is the state established by *preceding* chunks, so a
+  heading that opens a chunk is its own subject (already in the text) and
+  becomes the breadcrumb for the chunks that follow; a heading clears
+  deeper stack levels, and headings inside fences are ignored. `metadata`
+  adds a `heading_path` list field (for citation/filtering — invisible to
+  an embedding model), `prefix` folds the breadcrumb into the chunk text
+  via `chunking.apply_heading_path_prefix` (so a basic embedding model sees
+  the context), and `both` does each. The mode never moves boundaries, so
+  unlike the other chunk settings it does **not** clear chunk selections;
+  the breadcrumb is computed and shown in the chunk review table's "heading
+  path" column regardless of mode, and only the export writes it.
+  `Chunk.heading_path` carries the tuple; it flows through
+  `run_packaging_job(chunk_heading_path_mode=...)` and re-runs from the CLI
+  via `--profile`. Scoped to the chunked targets — bundles already preserve
+  each document's own headings, so breadcrumbs are not injected there.
+  Documented generated-file change: `00_RAG_EXPORT_NOTES.md` now lists the
+  optional `heading_path` key in the chunk schema and the breadcrumb in the
+  configurable-settings paragraph.
 - Profile-bound file review selection: `Profile.exclude_files` (active
   field) holds case-insensitive glob patterns matched by
   `scanner.match_path_patterns` against source-relative POSIX paths.
@@ -232,7 +332,7 @@ Already shipped:
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (23 fields total) + `save_profile`,
+  - `Profile` dataclass (26 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -241,12 +341,14 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the fifteen fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the eighteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
-    `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`).
+    `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
+    `chunk_split_sentences`, `chunk_fence_aware`,
+    `chunk_heading_path_mode`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -281,10 +383,10 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (30 cases), `test_chunking.py` (38 cases),
-  `test_readers.py` (6 cases), `test_profiles.py` (33 cases),
+  `test_pipeline.py` (36 cases), `test_chunking.py` (60 cases),
+  `test_readers.py` (6 cases), `test_profiles.py` (34 cases),
   `test_cli.py` (11 cases), and
-  `test_bundler.py` (4 cases) — 122 in total; passes with
+  `test_bundler.py` (4 cases) — 151 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -318,11 +420,25 @@ just a UI for the packer.
 
 Candidate Version 3 features:
 
-- goal selector: repair manual, FEMA/legal/policy, codebase, research,
+- **product-aware questionnaire / goal selector** (the priority V3 entry per
+  the 2026-06 direction update): a short triage — what destination/product,
+  structured vs. prose data, who owns retrieval, context-window size, citation
+  needs — that maps each answer pattern to a concrete packaging configuration
+  and either auto-defaults the features or directs the user to the right
+  settings. This is the answer to "the user shouldn't have to guess which
+  toggles are effective." Its rule set is to be grounded in the pending
+  deep-research findings on per-destination ingestion/retrieval behavior;
+- goal selector content: repair manual, FEMA/legal/policy, codebase, research,
   data/spreadsheet, reusable project knowledge, one-shot chat;
-- target-platform strategy recommendations for ChatGPT Project, Claude
-  Project, one-off chats, Gemini/large-context tools, NotebookLM-style source
-  sets, local RAG, and API agents;
+- target-platform strategy recommendations for self-hosted embedding-model RAG
+  (primary), Claude Projects, OpenAI ChatGPT (incl. enterprise/government
+  ChatGPT workspaces such as the GPT-5.1→5.4 "DHS chat"), Azure Databricks
+  Genie (structured/lakehouse-table analytics), the Databricks/Azure Knowledge
+  Assistant (document RAG), one-off chats, Gemini/large-context tools,
+  NotebookLM-style source sets, and API agents;
+- per-feature, cited configuration guidance: for every shipped/planned chunking
+  and bundling feature, a per-destination verdict (effective / inert / risky)
+  plus recommended defaults, surfaced to the user at the point of decision;
 - named packaging strategies: Claude-safe bundle, ChatGPT Project bundle,
   one-shot chat bundle, RAG-ready export, visual/manual bundle, human archive;
 - recommendation engine that explains why a strategy fits the source set
@@ -514,6 +630,31 @@ Manual Streamlit inputs and expected outputs:
   predecessor, chunk counts and ids match the preview (previews show
   chunks without the overlap text), and changing the overlap does not
   clear chunk selections.
+- Tick `Split oversize lines at sentences`, preview a document containing
+  a single line larger than the chunk size (e.g., a one-line paragraph
+  from a converted PDF or JSON field).
+  Expected: the over-budget chunk disappears, replaced by chunks within
+  budget with boundary reason `oversize line split at sentence
+  boundaries`; the corpus audit's over-budget warning clears; changing
+  the checkbox clears selections like a chunk-size change.
+- Tick `Keep code blocks whole (for codebases)`, preview a Markdown file
+  containing a fenced code block with a blank line inside it, using a
+  chunk size small enough to force a split near the fence.
+  Expected: with the toggle off, some chunk contains an odd number of
+  ``` markers (the fence is broken); with it on, every chunk's fences are
+  balanced, a fence larger than the chunk size appears whole with
+  boundary reason `oversize fenced code block kept whole`, and changing
+  the toggle clears selections like a chunk-size change.
+- Set `Heading breadcrumb (rag/cowork exports)` to each mode and preview a
+  document with nested headings (e.g. `# Manual` / `## Transmission` with a
+  long section), then export with `--target rag`.
+  Expected: the chunk review table always shows a "heading path" column
+  with the enclosing headings (a chunk that opens with a heading shows its
+  ancestors, not itself); `off` writes no `heading_path` key and is
+  byte-identical; `metadata` adds a `heading_path` list to each
+  `chunks.jsonl` record without touching the text; `prefix` prepends the
+  breadcrumb line to the chunk text; `both` does each; and changing the
+  mode does NOT clear chunk selections (it doesn't move boundaries).
 - In `Corpus chunking audit` with the heading strategy, open the
   `Heading browser` after analyzing.
   Expected: one row per distinct chunk heading with chunk/token/document

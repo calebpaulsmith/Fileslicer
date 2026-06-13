@@ -115,6 +115,9 @@ class ProfileDataclassTests(ProfilesTestCase):
             "chunk_heading_level",
             "chunk_min_tokens",
             "chunk_overlap_tokens",
+            "chunk_split_sentences",
+            "chunk_fence_aware",
+            "chunk_heading_path_mode",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -132,10 +135,20 @@ class ProfileDataclassTests(ProfilesTestCase):
             default_source_folder="C:/data",
             chunk_min_tokens=40,
             chunk_overlap_tokens=80,
+            chunk_split_sentences=True,
+            chunk_fence_aware=True,
+            chunk_heading_path_mode="both",
         )
         kwargs = profile.to_packaging_kwargs()
         self.assertEqual(kwargs["chunk_min_tokens"], 40)
         self.assertEqual(kwargs["chunk_overlap_tokens"], 80)
+        self.assertIs(kwargs["chunk_split_sentences"], True)
+        self.assertIs(kwargs["chunk_fence_aware"], True)
+        self.assertEqual(kwargs["chunk_heading_path_mode"], "both")
+
+    def test_validate_rejects_unknown_heading_path_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", chunk_heading_path_mode="sideways").validate()
 
     def test_to_packaging_kwargs_uses_overrides(self) -> None:
         profile = Profile(

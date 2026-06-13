@@ -1,0 +1,17 @@
+{
+  "DOC_0001": {
+    "source_file": "long.md",
+    "source_path": "long.md",
+    "chunk_ids": [
+      "DOC_0001__c001",
+      "DOC_0001__c002",
+      "DOC_0001__c003",
+      "DOC_0001__c004",
+      "DOC_0001__c005",
+      "DOC_0001__c006",
+      "DOC_0001__c007",
+      "DOC_0001__c008"
+    ],
+    "token_estimate": 331
+  }
+}

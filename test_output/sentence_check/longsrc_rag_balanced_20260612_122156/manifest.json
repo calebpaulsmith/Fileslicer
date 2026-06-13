@@ -1,0 +1,20 @@
+{
+  "project_name": "longsrc",
+  "target": "rag",
+  "mode": "balanced",
+  "entries": [
+    {
+      "doc_id": "DOC_0001",
+      "source_file": "long.md",
+      "source_path": "long.md",
+      "original_extension": ".md",
+      "file_type": "text",
+      "status": "ok",
+      "token_estimate": 331,
+      "char_count": 1230,
+      "word_count": 210,
+      "notes": "",
+      "output_bundle": ""
+    }
+  ]
+}

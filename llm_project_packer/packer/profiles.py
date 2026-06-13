@@ -18,7 +18,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from . import presets
-from .chunking import DEFAULT_HEADING_LEVEL, STRATEGIES, STRATEGY_TOKENS
+from .chunking import (
+    DEFAULT_HEADING_LEVEL,
+    HEADING_PATH_MODES,
+    HEADING_PATH_OFF,
+    STRATEGIES,
+    STRATEGY_TOKENS,
+)
 from .markdown_utils import safe_filename
 
 
@@ -55,6 +61,9 @@ ACTIVE_FIELDS: Sequence[str] = (
     "chunk_heading_level",
     "chunk_min_tokens",
     "chunk_overlap_tokens",
+    "chunk_split_sentences",
+    "chunk_fence_aware",
+    "chunk_heading_path_mode",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -94,6 +103,9 @@ class Profile:
     chunk_heading_level: int = DEFAULT_HEADING_LEVEL
     chunk_min_tokens: int = 0
     chunk_overlap_tokens: int = 0
+    chunk_split_sentences: bool = False
+    chunk_fence_aware: bool = False
+    chunk_heading_path_mode: str = HEADING_PATH_OFF
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -141,6 +153,11 @@ class Profile:
             raise ValueError("chunk_min_tokens must be >= 0 (0 disables merging).")
         if int(self.chunk_overlap_tokens) < 0:
             raise ValueError("chunk_overlap_tokens must be >= 0 (0 disables overlap).")
+        if self.chunk_heading_path_mode not in HEADING_PATH_MODES:
+            raise ValueError(
+                f"Unknown chunk_heading_path_mode {self.chunk_heading_path_mode!r}. "
+                f"Choose from {HEADING_PATH_MODES}."
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the profile to a JSON-friendly dict, including a schema tag."""
@@ -208,6 +225,9 @@ class Profile:
             "chunk_heading_level": int(self.chunk_heading_level),
             "chunk_min_tokens": int(self.chunk_min_tokens),
             "chunk_overlap_tokens": int(self.chunk_overlap_tokens),
+            "chunk_split_sentences": bool(self.chunk_split_sentences),
+            "chunk_fence_aware": bool(self.chunk_fence_aware),
+            "chunk_heading_path_mode": self.chunk_heading_path_mode,
         }
         return kwargs
 

@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .token_estimator import estimate_tokens
 
@@ -24,6 +24,8 @@ REASON_END_OF_DOCUMENT = "end of document"
 REASON_HEADING_SECTION = "section starts at a heading"
 REASON_PREAMBLE = "content before the first heading"
 REASON_MERGED_SMALL = "undersized chunk merged into its neighbor"
+REASON_SENTENCE_SPLIT = "oversize line split at sentence boundaries"
+REASON_FENCE_KEPT = "oversize fenced code block kept whole"
 
 STRATEGY_TOKENS = "tokens"
 STRATEGY_HEADINGS = "headings"
@@ -33,6 +35,7 @@ DEFAULT_HEADING_LEVEL = 2
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
 _LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 _TABLE_ROW_RE = re.compile(r"^\s*\|.*\|\s*$")
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+")
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class Chunk:
     token_estimate: int
     boundary_reason: str = ""
     structure: Optional[ChunkStructure] = None
+    heading_path: Tuple[str, ...] = ()  # enclosing headings above this chunk
 
     @property
     def first_heading(self) -> str:
@@ -72,24 +76,47 @@ class Chunk:
             return self.structure.headings[0]
         return ""
 
+    @property
+    def heading_path_display(self) -> str:
+        return format_heading_path(self.heading_path)
 
-def chunk_markdown(text: str, max_tokens: int) -> List[str]:
+
+def chunk_markdown(
+    text: str, max_tokens: int, split_sentences: bool = False, fence_aware: bool = False
+) -> List[str]:
     """Split text into chunks at paragraph boundaries within a token budget.
 
     Paragraphs are joined into a chunk while the running token estimate stays
     under ``max_tokens``. Paragraphs that exceed the budget on their own are
     further split by lines so we never emit silently-truncated content.
+    ``split_sentences`` additionally splits single lines larger than the
+    budget at sentence (then word) boundaries. ``fence_aware`` (intended for
+    codebases) treats fenced code blocks as atomic so no boundary lands
+    inside a fence.
     """
-    return [chunk_text for chunk_text, _ in chunk_markdown_with_reasons(text, max_tokens)]
+    return [
+        chunk_text
+        for chunk_text, _ in chunk_markdown_with_reasons(
+            text, max_tokens, split_sentences, fence_aware
+        )
+    ]
 
 
-def chunk_markdown_with_reasons(text: str, max_tokens: int) -> List[Tuple[str, str]]:
+def chunk_markdown_with_reasons(
+    text: str,
+    max_tokens: int,
+    split_sentences: bool = False,
+    fence_aware: bool = False,
+) -> List[Tuple[str, str]]:
     """Chunk like :func:`chunk_markdown` and pair each chunk with the reason
     its boundary was drawn (one of the module-level ``REASON_*`` constants)."""
     if max_tokens <= 0:
         return [(text, REASON_WHOLE_DOCUMENT)]
 
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    if fence_aware:
+        paragraphs = split_paragraphs_fence_aware(text)
+    else:
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     if not paragraphs:
         return [(text, REASON_WHOLE_DOCUMENT)]
 
@@ -107,8 +134,7 @@ def chunk_markdown_with_reasons(text: str, max_tokens: int) -> List[Tuple[str, s
                 buffer_tokens = 0
             # Split the oversize paragraph by lines.
             chunks.extend(
-                (piece, REASON_OVERSIZE_SPLIT)
-                for piece in _split_oversize_paragraph(para, max_tokens)
+                _split_oversize_paragraph(para, max_tokens, split_sentences, fence_aware)
             )
             continue
 
@@ -133,6 +159,8 @@ def chunk_document(
     strategy: str = STRATEGY_TOKENS,
     heading_level: int = DEFAULT_HEADING_LEVEL,
     min_tokens: int = 0,
+    split_sentences: bool = False,
+    fence_aware: bool = False,
 ) -> List[Chunk]:
     """Chunk a converted document body into indexed, annotated chunks.
 
@@ -145,16 +173,24 @@ def chunk_document(
 
     ``min_tokens`` is an opt-in floor (0 disables it): chunks smaller than it
     are merged into a neighbor via :func:`merge_undersized_chunks`, including
-    across heading-section boundaries.
+    across heading-section boundaries. ``split_sentences`` opts in to
+    splitting single lines larger than the budget at sentence (then word)
+    boundaries instead of emitting over-budget chunks. ``fence_aware``
+    (intended for codebases) keeps fenced code blocks whole: blank lines
+    inside a fence no longer split paragraphs, and a fence larger than the
+    budget is emitted as one over-budget chunk instead of being broken.
     """
     text = (body_markdown or "").strip()
     if not text:
         return []
     if strategy == STRATEGY_HEADINGS:
-        pairs = chunk_markdown_by_headings_with_reasons(text, max_tokens, heading_level)
+        pairs = chunk_markdown_by_headings_with_reasons(
+            text, max_tokens, heading_level, split_sentences, fence_aware
+        )
     else:
-        pairs = chunk_markdown_with_reasons(text, max_tokens)
+        pairs = chunk_markdown_with_reasons(text, max_tokens, split_sentences, fence_aware)
     pairs = merge_undersized_chunks(pairs, min_tokens, max_tokens)
+    paths = heading_paths_for_texts([chunk_text for chunk_text, _ in pairs])
     return [
         Chunk(
             index=i,
@@ -162,8 +198,9 @@ def chunk_document(
             token_estimate=estimate_tokens(chunk_text),
             boundary_reason=reason,
             structure=analyze_markdown_structure(chunk_text),
+            heading_path=path,
         )
-        for i, (chunk_text, reason) in enumerate(pairs, start=1)
+        for i, ((chunk_text, reason), path) in enumerate(zip(pairs, paths), start=1)
     ]
 
 
@@ -196,6 +233,8 @@ def chunk_markdown_by_headings_with_reasons(
     text: str,
     max_tokens: int,
     heading_level: int = DEFAULT_HEADING_LEVEL,
+    split_sentences: bool = False,
+    fence_aware: bool = False,
 ) -> List[Tuple[str, str]]:
     """Heading-aligned chunking: one chunk per heading section, with the
     token chunker applied inside sections larger than the budget."""
@@ -203,7 +242,9 @@ def chunk_markdown_by_headings_with_reasons(
     if not sections:
         return []
     if len(sections) == 1 and not _starts_with_heading(sections[0], heading_level):
-        return chunk_markdown_with_reasons(sections[0], max_tokens)
+        return chunk_markdown_with_reasons(
+            sections[0], max_tokens, split_sentences, fence_aware
+        )
 
     pairs: List[Tuple[str, str]] = []
     for section in sections:
@@ -214,8 +255,103 @@ def chunk_markdown_by_headings_with_reasons(
         if max_tokens <= 0 or estimate_tokens(section) <= max_tokens:
             pairs.append((section, section_reason))
         else:
-            pairs.extend(chunk_markdown_with_reasons(section, max_tokens))
+            pairs.extend(
+                chunk_markdown_with_reasons(section, max_tokens, split_sentences, fence_aware)
+            )
     return pairs
+
+
+HEADING_PATH_OFF = "off"
+HEADING_PATH_METADATA = "metadata"
+HEADING_PATH_PREFIX = "prefix"
+HEADING_PATH_BOTH = "both"
+HEADING_PATH_MODES = (
+    HEADING_PATH_OFF,
+    HEADING_PATH_METADATA,
+    HEADING_PATH_PREFIX,
+    HEADING_PATH_BOTH,
+)
+_HEADING_PATH_SEPARATOR = " > "
+
+
+def _iter_headings(text: str) -> Iterator[Tuple[int, str]]:
+    """Yield ``(level, title)`` for each ATX heading, skipping fenced code."""
+    in_code_fence = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        match = _HEADING_RE.match(stripped)
+        if match:
+            yield len(match.group(1)), match.group(2).strip()
+
+
+def heading_paths_for_texts(chunk_texts: Sequence[str]) -> List[Tuple[str, ...]]:
+    """Return each chunk's enclosing heading path, for chunks in document order.
+
+    Walks the chunks in order maintaining a heading stack (one slot per level
+    1-6). A chunk's path is the stack state established by all *preceding*
+    chunks, so a heading that opens a chunk describes that chunk's own body
+    (already visible in its text) and becomes the breadcrumb for the chunks
+    that follow it. A heading clears any deeper levels still on the stack.
+    The result depends only on the input texts, so previews and the export
+    agree. Paths are full depth (every enclosing level, including the title).
+    """
+    paths: List[Tuple[str, ...]] = []
+    stack: Dict[int, str] = {}
+    for text in chunk_texts:
+        paths.append(tuple(stack[level] for level in sorted(stack)))
+        for level, title in _iter_headings(text):
+            stack[level] = title
+            for deeper in [lvl for lvl in stack if lvl > level]:
+                del stack[deeper]
+    return paths
+
+
+def format_heading_path(path: Sequence[str]) -> str:
+    """Render a heading path as a single breadcrumb line (empty if no path)."""
+    return _HEADING_PATH_SEPARATOR.join(path)
+
+
+def apply_heading_path_prefix(text: str, path: Sequence[str]) -> str:
+    """Prefix ``text`` with its breadcrumb line, or return it unchanged.
+
+    Used by the ``prefix``/``both`` placement modes so an embedding model sees
+    the chunk's structural context. A chunk with no enclosing headings is
+    returned untouched.
+    """
+    crumb = format_heading_path(path)
+    if not crumb:
+        return text
+    return f"{crumb}\n\n{text}"
+
+
+def split_paragraphs_fence_aware(text: str) -> List[str]:
+    """Split ``text`` at blank lines, keeping fenced code blocks atomic.
+
+    Like ``text.split("\\n\\n")``, but a blank line inside a ``` fence never
+    starts a new paragraph, so a code block containing blank lines stays in
+    one piece. Whitespace-only lines outside fences count as blank.
+    """
+    paragraphs: List[str] = []
+    current: List[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not in_fence and not stripped:
+            if current:
+                paragraphs.append("\n".join(current).strip())
+                current = []
+            continue
+        current.append(line)
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+    if current:
+        paragraphs.append("\n".join(current).strip())
+    return [p for p in paragraphs if p]
 
 
 def merge_undersized_chunks(
@@ -333,22 +469,109 @@ def match_heading_patterns(heading: str, patterns: Sequence[str]) -> Tuple[str, 
     )
 
 
-def _split_oversize_paragraph(para: str, max_tokens: int) -> List[str]:
-    """Last-ditch line-level split for paragraphs that exceed the chunk budget."""
-    lines = para.split("\n")
-    chunks: List[str] = []
+def _split_oversize_paragraph(
+    para: str,
+    max_tokens: int,
+    split_sentences: bool = False,
+    fence_aware: bool = False,
+) -> List[Tuple[str, str]]:
+    """Last-ditch line-level split for paragraphs that exceed the chunk budget.
+
+    A single line larger than the budget normally stays whole (an over-budget
+    chunk the audit warns about); with ``split_sentences`` it is split at
+    sentence, then word, boundaries and tagged ``REASON_SENTENCE_SPLIT``.
+    With ``fence_aware``, a fenced code block is one atomic unit: it is never
+    split, and one larger than the budget is emitted whole and tagged
+    ``REASON_FENCE_KEPT``.
+    """
+    pairs: List[Tuple[str, str]] = []
     buffer: List[str] = []
     buffer_tokens = 0
-    for line in lines:
-        line_tokens = estimate_tokens(line)
-        if buffer_tokens + line_tokens <= max_tokens:
-            buffer.append(line)
-            buffer_tokens += line_tokens
+    for unit in _fence_line_units(para, fence_aware):
+        unit_tokens = estimate_tokens(unit)
+        if unit_tokens > max_tokens:
+            is_fence = fence_aware and (
+                "\n" in unit or unit.lstrip().startswith("```")
+            )
+            if is_fence or split_sentences:
+                if buffer:
+                    pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
+                    buffer = []
+                    buffer_tokens = 0
+                if is_fence:
+                    pairs.append((unit, REASON_FENCE_KEPT))
+                else:
+                    pairs.extend(
+                        (piece, REASON_SENTENCE_SPLIT)
+                        for piece in _split_oversize_line(unit, max_tokens)
+                    )
+                continue
+        if buffer_tokens + unit_tokens <= max_tokens:
+            buffer.append(unit)
+            buffer_tokens += unit_tokens
         else:
             if buffer:
-                chunks.append("\n".join(buffer))
-            buffer = [line]
-            buffer_tokens = line_tokens
+                pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
+            buffer = [unit]
+            buffer_tokens = unit_tokens
     if buffer:
-        chunks.append("\n".join(buffer))
-    return chunks
+        pairs.append(("\n".join(buffer), REASON_OVERSIZE_SPLIT))
+    return pairs
+
+
+def _fence_line_units(para: str, fence_aware: bool) -> List[str]:
+    """Lines of ``para``, with each fenced code block grouped into one unit."""
+    if not fence_aware:
+        return para.split("\n")
+    units: List[str] = []
+    fence: List[str] = []
+    in_fence = False
+    for line in para.split("\n"):
+        stripped = line.strip()
+        if in_fence:
+            fence.append(line)
+            if stripped.startswith("```"):
+                units.append("\n".join(fence))
+                fence = []
+                in_fence = False
+        elif stripped.startswith("```"):
+            fence = [line]
+            in_fence = True
+        else:
+            units.append(line)
+    if fence:
+        units.append("\n".join(fence))
+    return units
+
+
+def _split_oversize_line(line: str, max_tokens: int) -> List[str]:
+    """Split one oversize line at sentence boundaries, falling back to words.
+
+    Sentence detection is the naive ``(?<=[.!?])\\s+`` regex, so
+    abbreviations like "e.g." can split early — acceptable for chunk
+    boundaries. A sentence larger than the budget is broken into words; a
+    single word larger than the budget stays whole.
+    """
+    units: List[str] = []
+    for sentence in _SENTENCE_BOUNDARY_RE.split(line):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if estimate_tokens(sentence) > max_tokens:
+            units.extend(sentence.split())
+        else:
+            units.append(sentence)
+    pieces: List[str] = []
+    buffer: List[str] = []
+    for unit in units:
+        if buffer:
+            # Estimate the joined text, not the sum of parts, so separator
+            # overhead cannot push a piece over the budget.
+            if estimate_tokens(" ".join((*buffer, unit))) > max_tokens:
+                pieces.append(" ".join(buffer))
+                buffer = [unit]
+                continue
+        buffer.append(unit)
+    if buffer:
+        pieces.append(" ".join(buffer))
+    return pieces
