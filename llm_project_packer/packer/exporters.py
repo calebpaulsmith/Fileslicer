@@ -11,11 +11,17 @@ from typing import List
 from .bundler import Bundle, ConvertedDoc
 from .chunking import (
     DEFAULT_HEADING_LEVEL,
+    HEADING_PATH_BOTH,
+    HEADING_PATH_METADATA,
+    HEADING_PATH_OFF,
+    HEADING_PATH_PREFIX,
     STRATEGY_HEADINGS,
     STRATEGY_TOKENS,
     apply_chunk_overlap,
+    apply_heading_path_prefix,
     chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
+    heading_paths_for_texts,
     merge_undersized_chunks,
 )
 from .manifest import Manifest
@@ -296,12 +302,16 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         "- `source_path` — original file path relative to the input root",
         "- `text`      — chunk text",
         "- `token_estimate` — estimated token count for this chunk",
+        "- `heading_path` — (only when the heading-breadcrumb metadata mode is on)"
+        " the list of enclosing headings above the chunk, outermost first; use it"
+        " to cite or filter chunks by section.",
         "",
         "Chunks are split greedily by paragraph against the per-chunk token budget "
         "(or at headings when the heading strategy is selected). Chunk size, strategy, "
         "overlap between adjacent chunks, a minimum chunk size that merges tiny "
-        "chunks, and sentence-level splitting of oversize lines are all configurable "
-        "in the chunk review screen and saved profiles.",
+        "chunks, sentence-level splitting of oversize lines, and an optional heading "
+        "breadcrumb (added as metadata and/or prefixed into the chunk text) are all "
+        "configurable in the chunk review screen and saved profiles.",
         "",
         "## Optimizing this export for retrieval",
         "",
@@ -355,6 +365,7 @@ def write_rag_export(
     overlap_tokens: int = 0,
     split_sentences: bool = False,
     fence_aware: bool = False,
+    heading_path_mode: str = HEADING_PATH_OFF,
 ) -> None:
     """Write ``chunks.jsonl`` and ``source_map.json`` under ``rag_dir``.
 
@@ -364,7 +375,15 @@ def write_rag_export(
     what the user previewed. ``overlap_tokens > 0`` additionally prefixes
     each chunk with the tail of its predecessor (boundaries and chunk count
     are unchanged; only the exported text gains the overlap).
+
+    ``heading_path_mode`` attaches each chunk's enclosing heading breadcrumb:
+    ``metadata`` adds a ``heading_path`` list field, ``prefix`` prepends the
+    breadcrumb to the chunk text (so an embedding model sees it), ``both``
+    does each, and ``off`` (default) does neither — boundaries, chunk counts,
+    and ids are unchanged by any mode.
     """
+    want_metadata = heading_path_mode in (HEADING_PATH_METADATA, HEADING_PATH_BOTH)
+    want_prefix = heading_path_mode in (HEADING_PATH_PREFIX, HEADING_PATH_BOTH)
     rag_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = rag_dir / "chunks.jsonl"
     source_map_path = rag_dir / "source_map.json"
@@ -402,12 +421,16 @@ def write_rag_export(
                     text, max_chunk_tokens, split_sentences, fence_aware
                 )
             pairs = merge_undersized_chunks(pairs, min_chunk_tokens, max_chunk_tokens)
-            chunk_texts = apply_chunk_overlap(
-                [chunk_text for chunk_text, _ in pairs], overlap_tokens
-            )
+            boundary_texts = [chunk_text for chunk_text, _ in pairs]
+            heading_paths = heading_paths_for_texts(boundary_texts)
+            chunk_texts = apply_chunk_overlap(boundary_texts, overlap_tokens)
             chunk_ids: List[str] = []
-            for i, chunk_text in enumerate(chunk_texts, start=1):
+            for i, (chunk_text, path) in enumerate(
+                zip(chunk_texts, heading_paths), start=1
+            ):
                 chunk_id = f"{doc.entry.doc_id}__c{i:03d}"
+                if want_prefix:
+                    chunk_text = apply_heading_path_prefix(chunk_text, path)
                 tokens = estimate_tokens(chunk_text)
                 payload = {
                     "chunk_id": chunk_id,
@@ -417,6 +440,8 @@ def write_rag_export(
                     "text": chunk_text,
                     "token_estimate": tokens,
                 }
+                if want_metadata:
+                    payload["heading_path"] = list(path)
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 chunk_ids.append(chunk_id)
             source_map[doc.entry.doc_id] = {

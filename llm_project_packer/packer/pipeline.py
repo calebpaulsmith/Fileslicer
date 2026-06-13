@@ -17,6 +17,7 @@ from .bundler import (
 )
 from .chunking import (
     DEFAULT_HEADING_LEVEL,
+    HEADING_PATH_OFF,
     STRATEGY_TOKENS,
     Chunk,
     chunk_document,
@@ -86,6 +87,7 @@ def run_packaging_job(
     chunk_overlap_tokens: int = 0,
     chunk_split_sentences: bool = False,
     chunk_fence_aware: bool = False,
+    chunk_heading_path_mode: str = HEADING_PATH_OFF,
     options: Optional[Dict[str, Any]] = None,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
@@ -130,7 +132,11 @@ def run_packaging_job(
     documents are chunked. ``chunk_fence_aware`` (default off; intended for
     codebases) treats fenced code blocks as atomic so no chunk boundary
     lands inside a fence; a fence larger than the budget is kept whole as
-    an over-budget chunk.
+    an over-budget chunk. ``chunk_heading_path_mode`` (``off`` default,
+    ``metadata``/``prefix``/``both``) attaches each ``rag``/``cowork`` chunk's
+    enclosing heading breadcrumb to ``rag_ready/chunks.jsonl`` — as a
+    ``heading_path`` field, prefixed into the chunk text, or both. It does
+    not move boundaries, so it never affects chunk indices or selections.
     """
     del options
     source_path = Path(source_dir).expanduser().resolve()
@@ -165,6 +171,7 @@ def run_packaging_job(
         chunk_overlap_tokens=chunk_overlap_tokens,
         chunk_split_sentences=chunk_split_sentences,
         chunk_fence_aware=chunk_fence_aware,
+        chunk_heading_path_mode=chunk_heading_path_mode,
         progress_callback=progress_callback,
     )
 
@@ -183,6 +190,7 @@ def run_packaging_config(
     chunk_overlap_tokens: int = 0,
     chunk_split_sentences: bool = False,
     chunk_fence_aware: bool = False,
+    chunk_heading_path_mode: str = HEADING_PATH_OFF,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> PackResult:
     """Run a complete packaging job from a validated ``PackerConfig``."""
@@ -335,6 +343,7 @@ def run_packaging_config(
             overlap_tokens=chunk_overlap_tokens,
             split_sentences=chunk_split_sentences,
             fence_aware=chunk_fence_aware,
+            heading_path_mode=chunk_heading_path_mode,
         )
         emit("rag_written", f"  Wrote RAG chunks to {rag_dir}.", {"path": rag_dir})
         if cfg.target == "cowork":

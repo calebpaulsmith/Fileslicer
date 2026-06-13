@@ -25,6 +25,9 @@ from packer.chunking import (  # noqa: E402
     chunk_markdown,
     chunk_markdown_by_headings_with_reasons,
     chunk_markdown_with_reasons,
+    apply_heading_path_prefix,
+    format_heading_path,
+    heading_paths_for_texts,
     match_heading_patterns,
     merge_undersized_chunks,
     split_into_heading_sections,
@@ -440,6 +443,59 @@ class ApplyChunkOverlapTests(unittest.TestCase):
     def test_boundary_count_is_preserved(self) -> None:
         chunks = ["one one one", "two two two", "three three three"]
         self.assertEqual(len(apply_chunk_overlap(chunks, 2)), len(chunks))
+
+
+class HeadingPathTests(unittest.TestCase):
+    def test_empty_when_no_headings(self) -> None:
+        paths = heading_paths_for_texts(["plain one", "plain two"])
+        self.assertEqual(paths, [(), ()])
+
+    def test_opening_heading_is_not_in_its_own_path(self) -> None:
+        # A heading that opens a chunk describes that chunk's body (already in
+        # its text); it becomes the breadcrumb for the chunks that follow.
+        paths = heading_paths_for_texts(["# Title\n\nbody", "more body"])
+        self.assertEqual(paths, [(), ("Title",)])
+
+    def test_nested_headings_accumulate_by_level(self) -> None:
+        texts = [
+            "# Manual",
+            "## Transmission",
+            "### Removal\n\nRemove bolts.",
+            "Tighten to spec.",
+        ]
+        paths = heading_paths_for_texts(texts)
+        self.assertEqual(paths[3], ("Manual", "Transmission", "Removal"))
+
+    def test_new_heading_clears_deeper_levels(self) -> None:
+        texts = [
+            "# Manual",
+            "## A\n\n### A1\n\ndetail",
+            "## B\n\nother",
+            "trailing",
+        ]
+        paths = heading_paths_for_texts(texts)
+        # After "## B" the stale "### A1" must be gone.
+        self.assertEqual(paths[3], ("Manual", "B"))
+
+    def test_headings_inside_fences_are_ignored(self) -> None:
+        texts = ["# Real", "```\n# not a heading\n```\n\nbody", "after"]
+        paths = heading_paths_for_texts(texts)
+        self.assertEqual(paths[2], ("Real",))
+
+    def test_format_and_prefix_helpers(self) -> None:
+        self.assertEqual(format_heading_path(()), "")
+        self.assertEqual(format_heading_path(("A", "B")), "A > B")
+        self.assertEqual(apply_heading_path_prefix("body", ()), "body")
+        self.assertEqual(
+            apply_heading_path_prefix("body", ("A", "B")), "A > B\n\nbody"
+        )
+
+    def test_chunk_document_populates_heading_path(self) -> None:
+        text = "# Manual\n\n## Removal\n\n" + _paragraph("step", 40)
+        chunks = chunk_document(text, 30, strategy=STRATEGY_HEADINGS, heading_level=2)
+        deepest = chunks[-1]
+        self.assertIn("Manual", deepest.heading_path)
+        self.assertEqual(deepest.heading_path_display, format_heading_path(deepest.heading_path))
 
 
 if __name__ == "__main__":

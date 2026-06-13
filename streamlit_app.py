@@ -31,6 +31,11 @@ import streamlit as st  # noqa: E402
 from packer import presets  # noqa: E402
 from packer.chunking import (  # noqa: E402
     DEFAULT_HEADING_LEVEL,
+    HEADING_PATH_BOTH,
+    HEADING_PATH_METADATA,
+    HEADING_PATH_OFF,
+    HEADING_PATH_MODES,
+    HEADING_PATH_PREFIX,
     STRATEGY_HEADINGS,
     STRATEGY_TOKENS,
     match_heading_patterns,
@@ -86,6 +91,12 @@ DEFAULT_CHUNK_REVIEW_TOKENS = 800
 CHUNK_STRATEGY_LABELS = {
     STRATEGY_TOKENS: "Token budget (pack paragraphs)",
     STRATEGY_HEADINGS: "Heading sections (split at headings)",
+}
+HEADING_PATH_LABELS = {
+    HEADING_PATH_OFF: "Off",
+    HEADING_PATH_METADATA: "Metadata field only",
+    HEADING_PATH_PREFIX: "Prefix into chunk text",
+    HEADING_PATH_BOTH: "Both (field + prefix)",
 }
 
 
@@ -1100,14 +1111,16 @@ def _export_chunk_selections(
     key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
     files: Sequence[ScannedFile],
     selections: Dict[str, bool],
-) -> Tuple[Dict[str, List[int]], int | None, str, int, int, int, bool, bool]:
+) -> Tuple[Dict[str, List[int]], int | None, str, int, int, int, bool, bool, str]:
     """Return partial chunk selections for included files plus the chunk
     settings (budget, strategy, heading level, min size, overlap, sentence
-    splitting, fence handling) they were made under.
+    splitting, fence handling, heading-breadcrumb mode) they were made under.
 
     The chunk settings come from the active profile (the review widgets bind
     to it), so a RAG export's ``chunks.jsonl`` matches what the user
-    previewed even without partial selections."""
+    previewed even without partial selections. The heading-breadcrumb mode
+    is profile-level (it does not move boundaries), so it is read straight
+    from the profile."""
     store = _chunk_store(key)
     included = set(_included_paths(files, selections))
     partial: Dict[str, List[int]] = {}
@@ -1123,6 +1136,7 @@ def _export_chunk_selections(
     overlap_tokens = int(profile.chunk_overlap_tokens or 0)
     split_sentences = bool(profile.chunk_split_sentences)
     fence_aware = bool(profile.chunk_fence_aware)
+    heading_path_mode = profile.chunk_heading_path_mode
     for relative_path, state in store.items():
         if relative_path not in included:
             continue
@@ -1145,6 +1159,7 @@ def _export_chunk_selections(
         overlap_tokens,
         split_sentences,
         fence_aware,
+        heading_path_mode,
     )
 
 
@@ -1331,6 +1346,27 @@ def _render_chunk_review(
             )
         )
         profile.chunk_fence_aware = fence_aware
+
+    heading_path_options = list(HEADING_PATH_MODES)
+    heading_path_mode = st.selectbox(
+        "Heading breadcrumb (rag/cowork exports)",
+        options=heading_path_options,
+        index=_safe_index(heading_path_options, profile.chunk_heading_path_mode),
+        format_func=lambda value: HEADING_PATH_LABELS[value],
+        key=_key("chunk_heading_path_mode"),
+        help=(
+            "Attaches each chunk's enclosing heading path (outermost first) to "
+            "rag_ready/chunks.jsonl. 'Metadata field' adds a heading_path list "
+            "for citation/filtering — invisible to an embedding model. 'Prefix "
+            "into chunk text' folds the breadcrumb into the embedded text, "
+            "which helps a basic embedding model match the chunk's context. "
+            "'Both' does each. It does not move chunk boundaries, so it never "
+            "changes chunk selections. The breadcrumb shown in the table below "
+            "is computed regardless; this only controls what the export writes. "
+            "Saved with the profile."
+        ),
+    )
+    profile.chunk_heading_path_mode = heading_path_mode
 
     stale_paths = [
         relative_path
@@ -1850,6 +1886,7 @@ def _render_chunk_editor(
             "chunk": chunk.index,
             "tokens": chunk.token_estimate,
             "heading": chunk.first_heading,
+            "heading_path": chunk.heading_path_display,
             "structure": chunk.structure.describe() if chunk.structure else "",
             "boundary": chunk.boundary_reason,
             "preview": _chunk_preview_text(chunk.text),
@@ -1871,11 +1908,25 @@ def _render_chunk_editor(
             "chunk": st.column_config.NumberColumn("chunk", format="%d"),
             "tokens": st.column_config.NumberColumn("tokens", format="%d"),
             "heading": st.column_config.TextColumn("heading"),
+            "heading_path": st.column_config.TextColumn(
+                "heading path",
+                help="Enclosing headings above this chunk, outermost first. "
+                "This is the breadcrumb the export attaches when the heading "
+                "breadcrumb mode is on.",
+            ),
             "structure": st.column_config.TextColumn("structure"),
             "boundary": st.column_config.TextColumn("boundary"),
             "preview": st.column_config.TextColumn("preview"),
         },
-        disabled=["chunk", "tokens", "heading", "structure", "boundary", "preview"],
+        disabled=[
+            "chunk",
+            "tokens",
+            "heading",
+            "heading_path",
+            "structure",
+            "boundary",
+            "preview",
+        ],
     )
     state["selected"] = sorted(
         int(record["chunk"])
@@ -2026,6 +2077,7 @@ def _render_preview_and_export(
         chunk_overlap_tokens,
         chunk_split_sentences,
         chunk_fence_aware,
+        chunk_heading_path_mode,
     ) = _export_chunk_selections(key, files, selections)
     warnings = _preview_warnings(profile, files, selected_files)
     if chunk_selections:
@@ -2046,6 +2098,10 @@ def _render_preview_and_export(
             details += ", oversize lines split at sentences"
         if chunk_fence_aware:
             details += ", code blocks kept whole"
+        if chunk_heading_path_mode != HEADING_PATH_OFF:
+            details += (
+                f", heading breadcrumb ({HEADING_PATH_LABELS[chunk_heading_path_mode]})"
+            )
         warnings.append(
             f"rag_ready/chunks.jsonl will use the chunk review settings: {details}."
         )
@@ -2116,6 +2172,7 @@ def _render_preview_and_export(
             chunk_overlap_tokens=chunk_overlap_tokens,
             chunk_split_sentences=chunk_split_sentences,
             chunk_fence_aware=chunk_fence_aware,
+            chunk_heading_path_mode=chunk_heading_path_mode,
         )
 
     last_result = st.session_state.get(SESSION_KEY_LAST_EXPORT_RESULT)
@@ -2137,6 +2194,7 @@ def _run_export(
     chunk_overlap_tokens: int = 0,
     chunk_split_sentences: bool = False,
     chunk_fence_aware: bool = False,
+    chunk_heading_path_mode: str = HEADING_PATH_OFF,
 ) -> None:
     source_dir = _resolved_source_path(profile)
     output_dir = _resolved_output_path(profile)
@@ -2186,6 +2244,7 @@ def _run_export(
             chunk_overlap_tokens=chunk_overlap_tokens,
             chunk_split_sentences=chunk_split_sentences,
             chunk_fence_aware=chunk_fence_aware,
+            chunk_heading_path_mode=chunk_heading_path_mode,
             progress_callback=on_progress,
         )
     except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI

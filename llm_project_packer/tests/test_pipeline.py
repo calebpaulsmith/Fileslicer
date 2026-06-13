@@ -341,6 +341,69 @@ class PipelineTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def _heading_path_doc(self) -> str:
+        long_body = " ".join(["remove the bolt"] * 60)
+        return f"# Manual\n\n## Transmission\n\n{long_body}\n"
+
+    def _run_heading_path_export(self, mode: str):
+        root = self.make_tempdir()
+        source = root / "source"
+        output = root / "output"
+        source.mkdir()
+        (source / "doc.md").write_text(self._heading_path_doc(), encoding="utf-8")
+        result = run_packaging_job(
+            source,
+            output,
+            target="rag",
+            mode="balanced",
+            chunk_token_budget=40,
+            chunk_strategy=STRATEGY_HEADINGS,
+            chunk_heading_path_mode=mode,
+        )
+        lines = (
+            (result.export_dir / "rag_ready" / "chunks.jsonl")
+            .read_text(encoding="utf-8")
+            .strip()
+            .splitlines()
+        )
+        records = [json.loads(line) for line in lines]
+        return root, records
+
+    def test_rag_heading_path_off_adds_no_field(self) -> None:
+        root, records = self._run_heading_path_export("off")
+        try:
+            self.assertTrue(len(records) > 1)
+            self.assertTrue(all("heading_path" not in r for r in records))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rag_heading_path_metadata_adds_field_without_touching_text(self) -> None:
+        root, records = self._run_heading_path_export("metadata")
+        try:
+            tail = records[-1]
+            self.assertEqual(tail["heading_path"], ["Manual", "Transmission"])
+            self.assertFalse(tail["text"].startswith("Manual > Transmission"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rag_heading_path_prefix_folds_into_text(self) -> None:
+        root, records = self._run_heading_path_export("prefix")
+        try:
+            tail = records[-1]
+            self.assertTrue(tail["text"].startswith("Manual > Transmission\n\n"))
+            self.assertNotIn("heading_path", tail)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_rag_heading_path_both_does_each(self) -> None:
+        root, records = self._run_heading_path_export("both")
+        try:
+            tail = records[-1]
+            self.assertEqual(tail["heading_path"], ["Manual", "Transmission"])
+            self.assertTrue(tail["text"].startswith("Manual > Transmission\n\n"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_rag_export_applies_chunk_overlap(self) -> None:
         root = self.make_tempdir()
         try:

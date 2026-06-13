@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .token_estimator import estimate_tokens
 
@@ -68,12 +68,17 @@ class Chunk:
     token_estimate: int
     boundary_reason: str = ""
     structure: Optional[ChunkStructure] = None
+    heading_path: Tuple[str, ...] = ()  # enclosing headings above this chunk
 
     @property
     def first_heading(self) -> str:
         if self.structure and self.structure.headings:
             return self.structure.headings[0]
         return ""
+
+    @property
+    def heading_path_display(self) -> str:
+        return format_heading_path(self.heading_path)
 
 
 def chunk_markdown(
@@ -185,6 +190,7 @@ def chunk_document(
     else:
         pairs = chunk_markdown_with_reasons(text, max_tokens, split_sentences, fence_aware)
     pairs = merge_undersized_chunks(pairs, min_tokens, max_tokens)
+    paths = heading_paths_for_texts([chunk_text for chunk_text, _ in pairs])
     return [
         Chunk(
             index=i,
@@ -192,8 +198,9 @@ def chunk_document(
             token_estimate=estimate_tokens(chunk_text),
             boundary_reason=reason,
             structure=analyze_markdown_structure(chunk_text),
+            heading_path=path,
         )
-        for i, (chunk_text, reason) in enumerate(pairs, start=1)
+        for i, ((chunk_text, reason), path) in enumerate(zip(pairs, paths), start=1)
     ]
 
 
@@ -252,6 +259,74 @@ def chunk_markdown_by_headings_with_reasons(
                 chunk_markdown_with_reasons(section, max_tokens, split_sentences, fence_aware)
             )
     return pairs
+
+
+HEADING_PATH_OFF = "off"
+HEADING_PATH_METADATA = "metadata"
+HEADING_PATH_PREFIX = "prefix"
+HEADING_PATH_BOTH = "both"
+HEADING_PATH_MODES = (
+    HEADING_PATH_OFF,
+    HEADING_PATH_METADATA,
+    HEADING_PATH_PREFIX,
+    HEADING_PATH_BOTH,
+)
+_HEADING_PATH_SEPARATOR = " > "
+
+
+def _iter_headings(text: str) -> Iterator[Tuple[int, str]]:
+    """Yield ``(level, title)`` for each ATX heading, skipping fenced code."""
+    in_code_fence = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code_fence = not in_code_fence
+            continue
+        if in_code_fence:
+            continue
+        match = _HEADING_RE.match(stripped)
+        if match:
+            yield len(match.group(1)), match.group(2).strip()
+
+
+def heading_paths_for_texts(chunk_texts: Sequence[str]) -> List[Tuple[str, ...]]:
+    """Return each chunk's enclosing heading path, for chunks in document order.
+
+    Walks the chunks in order maintaining a heading stack (one slot per level
+    1-6). A chunk's path is the stack state established by all *preceding*
+    chunks, so a heading that opens a chunk describes that chunk's own body
+    (already visible in its text) and becomes the breadcrumb for the chunks
+    that follow it. A heading clears any deeper levels still on the stack.
+    The result depends only on the input texts, so previews and the export
+    agree. Paths are full depth (every enclosing level, including the title).
+    """
+    paths: List[Tuple[str, ...]] = []
+    stack: Dict[int, str] = {}
+    for text in chunk_texts:
+        paths.append(tuple(stack[level] for level in sorted(stack)))
+        for level, title in _iter_headings(text):
+            stack[level] = title
+            for deeper in [lvl for lvl in stack if lvl > level]:
+                del stack[deeper]
+    return paths
+
+
+def format_heading_path(path: Sequence[str]) -> str:
+    """Render a heading path as a single breadcrumb line (empty if no path)."""
+    return _HEADING_PATH_SEPARATOR.join(path)
+
+
+def apply_heading_path_prefix(text: str, path: Sequence[str]) -> str:
+    """Prefix ``text`` with its breadcrumb line, or return it unchanged.
+
+    Used by the ``prefix``/``both`` placement modes so an embedding model sees
+    the chunk's structural context. A chunk with no enclosing headings is
+    returned untouched.
+    """
+    crumb = format_heading_path(path)
+    if not crumb:
+        return text
+    return f"{crumb}\n\n{text}"
 
 
 def split_paragraphs_fence_aware(text: str) -> List[str]:

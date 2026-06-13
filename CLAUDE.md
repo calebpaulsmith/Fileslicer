@@ -254,6 +254,31 @@ Already shipped:
   via `--profile`. One documented opt-in nuance: whitespace-only lines
   count as blank when fence-aware splitting is on, where plain
   `split("\n\n")` does not.
+- Heading-path breadcrumbs for retrieval (profile-bound active field
+  `Profile.chunk_heading_path_mode`, one of
+  `chunking.HEADING_PATH_MODES` = `off`/`metadata`/`prefix`/`both`,
+  default `off` = byte-identical): attaches each `rag`/`cowork` chunk's
+  chain of enclosing headings (outermost first, full depth) to
+  `rag_ready/chunks.jsonl`. `chunking.heading_paths_for_texts` computes
+  paths by walking the ordered chunk texts with a per-level heading stack —
+  a chunk's path is the state established by *preceding* chunks, so a
+  heading that opens a chunk is its own subject (already in the text) and
+  becomes the breadcrumb for the chunks that follow; a heading clears
+  deeper stack levels, and headings inside fences are ignored. `metadata`
+  adds a `heading_path` list field (for citation/filtering — invisible to
+  an embedding model), `prefix` folds the breadcrumb into the chunk text
+  via `chunking.apply_heading_path_prefix` (so a basic embedding model sees
+  the context), and `both` does each. The mode never moves boundaries, so
+  unlike the other chunk settings it does **not** clear chunk selections;
+  the breadcrumb is computed and shown in the chunk review table's "heading
+  path" column regardless of mode, and only the export writes it.
+  `Chunk.heading_path` carries the tuple; it flows through
+  `run_packaging_job(chunk_heading_path_mode=...)` and re-runs from the CLI
+  via `--profile`. Scoped to the chunked targets — bundles already preserve
+  each document's own headings, so breadcrumbs are not injected there.
+  Documented generated-file change: `00_RAG_EXPORT_NOTES.md` now lists the
+  optional `heading_path` key in the chunk schema and the breadcrumb in the
+  configurable-settings paragraph.
 - Profile-bound file review selection: `Profile.exclude_files` (active
   field) holds case-insensitive glob patterns matched by
   `scanner.match_path_patterns` against source-relative POSIX paths.
@@ -269,7 +294,7 @@ Already shipped:
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (25 fields total) + `save_profile`,
+  - `Profile` dataclass (26 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
@@ -278,13 +303,14 @@ Already shipped:
     project_name=...)` returns kwargs ready for `run_packaging_job`. It
     emits only the active fields and lets callers override
     source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the seventeen fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the eighteen fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
     `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
-    `chunk_split_sentences`, `chunk_fence_aware`).
+    `chunk_split_sentences`, `chunk_fence_aware`,
+    `chunk_heading_path_mode`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
@@ -319,10 +345,10 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (32 cases), `test_chunking.py` (53 cases),
-  `test_readers.py` (6 cases), `test_profiles.py` (33 cases),
+  `test_pipeline.py` (36 cases), `test_chunking.py` (60 cases),
+  `test_readers.py` (6 cases), `test_profiles.py` (34 cases),
   `test_cli.py` (11 cases), and
-  `test_bundler.py` (4 cases) — 139 in total; passes with
+  `test_bundler.py` (4 cases) — 151 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -567,6 +593,16 @@ Manual Streamlit inputs and expected outputs:
   balanced, a fence larger than the chunk size appears whole with
   boundary reason `oversize fenced code block kept whole`, and changing
   the toggle clears selections like a chunk-size change.
+- Set `Heading breadcrumb (rag/cowork exports)` to each mode and preview a
+  document with nested headings (e.g. `# Manual` / `## Transmission` with a
+  long section), then export with `--target rag`.
+  Expected: the chunk review table always shows a "heading path" column
+  with the enclosing headings (a chunk that opens with a heading shows its
+  ancestors, not itself); `off` writes no `heading_path` key and is
+  byte-identical; `metadata` adds a `heading_path` list to each
+  `chunks.jsonl` record without touching the text; `prefix` prepends the
+  breadcrumb line to the chunk text; `both` does each; and changing the
+  mode does NOT clear chunk selections (it doesn't move boundaries).
 - In `Corpus chunking audit` with the heading strategy, open the
   `Heading browser` after analyzing.
   Expected: one row per distinct chunk heading with chunk/token/document
