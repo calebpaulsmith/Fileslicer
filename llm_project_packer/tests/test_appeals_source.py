@@ -14,7 +14,12 @@ sys.path.insert(0, str(PROJECT_DIR))
 from packer import appeals_source  # noqa: E402
 from packer.appeals_source import load_appeal_docs  # noqa: E402
 from packer.manifest import Manifest  # noqa: E402
-from packer.pipeline import run_packaging_job  # noqa: E402
+from packer.pipeline import (  # noqa: E402
+    load_appeal_documents,
+    run_packaging_job,
+    summarize_appeal_bundles,
+    summarize_appeal_chunks,
+)
 
 _FINAL_COLUMNS = (
     "final_id",
@@ -260,6 +265,44 @@ class AppealsSourceTests(unittest.TestCase):
         self.assertEqual(meta["appellant"], "County Y")
         self.assertEqual(meta["status"], "Denied")
         self.assertIn("44 C.F.R. 206.226(a)", meta["citations"])
+
+
+class AppealPreviewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.db = self.tmp / "appeals.sqlite3"
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        rows = [
+            {
+                "final_id": i,
+                "final_title": f"Appeal {i}",
+                "final_summary_text": "Severe storms damaged the road. " * 20,
+            }
+            for i in range(1, 13)
+        ]
+        _build_db(self.db, rows)
+
+    def test_load_appeal_documents_renders_without_export(self) -> None:
+        docs = load_appeal_documents(self.db)
+        self.assertEqual(len(docs), 12)
+        self.assertTrue(all(d.token_estimate > 0 for d in docs))
+
+    def test_bundle_summary_responds_to_budget(self) -> None:
+        docs = load_appeal_documents(self.db)
+        small = summarize_appeal_bundles(docs, 400, "greedy")
+        large = summarize_appeal_bundles(docs, 5000, "greedy")
+        # A smaller budget yields more bundles; totals are stable.
+        self.assertGreater(small["bundle_count"], large["bundle_count"])
+        self.assertEqual(small["total_tokens"], large["total_tokens"])
+        self.assertEqual(len(small["per_bundle"]), small["bundle_count"])
+
+    def test_chunk_summary_reports_sizes(self) -> None:
+        docs = load_appeal_documents(self.db)
+        summary = summarize_appeal_chunks(docs, 120, "tokens")
+        self.assertEqual(summary["doc_count"], 12)
+        self.assertGreater(summary["chunk_count"], 0)
+        self.assertEqual(len(summary["sizes"]), summary["chunk_count"])
+        self.assertLessEqual(summary["smallest"], summary["largest"])
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from .bundler import (
     make_converted_doc,
     split_doc_at_headings,
     split_into_bundles,
+    split_into_bundles_medium,
     write_bundle,
 )
 from .chunking import (
@@ -466,6 +467,83 @@ def run_packaging_config(
         warnings=warnings,
         errors=errors,
     )
+
+
+def load_appeal_documents(appeals_db: Path | str) -> List[ConvertedDoc]:
+    """Load and render appeals from the database as ``ConvertedDoc``s (no export).
+
+    For UI preview/visualization: the same rendering a real appeals run uses,
+    without writing any files. Per-appeal failures are isolated into a discarded
+    manifest exactly as in a real run.
+    """
+    manifest = Manifest(project_name="preview", target="rag", mode="balanced")
+    return load_appeal_docs(
+        Path(appeals_db), manifest, warnings=[], errors=[], emit=lambda *args: None
+    )
+
+
+def summarize_appeal_bundles(
+    docs: Sequence[ConvertedDoc],
+    max_bundle_tokens: int,
+    bundling_mode: str = "greedy",
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> Dict[str, Any]:
+    """Compute the bundle plan for appeal docs without writing files (UI preview).
+
+    Reuses the same bundler the export uses, so the preview matches the run.
+    """
+    docs = list(docs)
+    if bundling_mode == "medium":
+        bundles = split_into_bundles_medium(docs, max_bundle_tokens, heading_level)
+    else:
+        bundles = split_into_bundles(docs, max_bundle_tokens)
+    per_bundle = [
+        {"name": b.name, "tokens": b.total_tokens, "doc_count": len(b.docs)}
+        for b in bundles
+    ]
+    return {
+        "doc_count": len(docs),
+        "total_tokens": sum(d.token_estimate for d in docs),
+        "bundle_count": len(bundles),
+        "per_bundle": per_bundle,
+        "over_budget": sum(1 for b in bundles if b.total_tokens > max_bundle_tokens),
+    }
+
+
+def summarize_appeal_chunks(
+    docs: Sequence[ConvertedDoc],
+    chunk_token_budget: int,
+    chunk_strategy: str = STRATEGY_TOKENS,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+    min_chunk_tokens: int = 0,
+    split_sentences: bool = False,
+    fence_aware: bool = False,
+) -> Dict[str, Any]:
+    """Compute chunk statistics for appeal docs without writing files (UI preview)."""
+    sizes: List[int] = []
+    for doc in docs:
+        chunks = chunk_document(
+            doc.body_markdown,
+            chunk_token_budget,
+            chunk_strategy,
+            heading_level,
+            min_chunk_tokens,
+            split_sentences,
+            fence_aware,
+        )
+        sizes.extend(c.token_estimate for c in chunks)
+    ordered = sorted(sizes)
+    n = len(ordered)
+    return {
+        "doc_count": len(docs),
+        "chunk_count": n,
+        "total_tokens": sum(ordered),
+        "smallest": ordered[0] if n else 0,
+        "median": ordered[n // 2] if n else 0,
+        "largest": ordered[-1] if n else 0,
+        "over_budget": sum(1 for s in ordered if s > chunk_token_budget),
+        "sizes": ordered,
+    }
 
 
 def _prepare_medium_docs(
