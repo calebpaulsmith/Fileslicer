@@ -29,6 +29,7 @@ if str(PACKER_PARENT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from packer import presets  # noqa: E402
+from packer.config import BUNDLING_MODES  # noqa: E402
 from packer.chunking import (  # noqa: E402
     DEFAULT_HEADING_LEVEL,
     HEADING_PATH_BOTH,
@@ -41,6 +42,11 @@ from packer.chunking import (  # noqa: E402
     match_heading_patterns,
 )
 from packer.exporters import InstructionContext, write_instructions  # noqa: E402
+from packer.guidance import (  # noqa: E402
+    DESTINATION_LABELS,
+    DESTINATIONS,
+    guidance_for_destination,
+)
 from packer.markdown_utils import safe_filename  # noqa: E402
 from packer.pipeline import (  # noqa: E402
     DocumentChunkPreview,
@@ -682,6 +688,20 @@ def _render_project_setup(profile: Profile) -> None:
         key=_key("output_folder"),
     )
 
+    dest_options = [""] + list(DESTINATIONS)
+    dest_labels = {"": "— none (no destination-specific guidance) —", **DESTINATION_LABELS}
+    profile.destination = st.selectbox(
+        "Destination (adds packaging guidance to the instructions)",
+        options=dest_options,
+        index=_safe_index(dest_options, profile.destination),
+        format_func=lambda value: dest_labels.get(value, value),
+        key=_key("destination"),
+    )
+    if profile.destination:
+        with st.expander("Packaging guidance for this destination", expanded=False):
+            for line in guidance_for_destination(profile.destination):
+                st.markdown(f"- {line}")
+
 
 def _render_packaging(profile: Profile) -> None:
     st.subheader("Packaging target")
@@ -702,6 +722,27 @@ def _render_packaging(profile: Profile) -> None:
             options=modes,
             index=_safe_index(modes, profile.mode),
             key=_key("mode"),
+        )
+
+    bundling_modes = list(BUNDLING_MODES)
+    profile.bundling_mode = st.selectbox(
+        "Bundling mode (non-RAG targets)",
+        options=bundling_modes,
+        index=_safe_index(bundling_modes, profile.bundling_mode),
+        format_func=lambda value: {
+            "greedy": "greedy — pack documents up to the budget",
+            "medium": "medium — one focused file per source, split oversize at headings (ChatGPT Enterprise / DHS)",
+        }.get(value, value),
+        key=_key("bundling_mode"),
+    )
+
+    if profile.target == "cowork":
+        profile.embedding_model = st.text_input(
+            "Embedding model (cowork hybrid RAG)",
+            value=profile.embedding_model,
+            help="Blank or 'hashing' = offline. 'openai:text-embedding-3-small' or "
+            "'voyage:voyage-3' send chunk text to the provider for real semantic search.",
+            key=_key("embedding_model"),
         )
 
     include_csv = st.text_input(
@@ -2245,6 +2286,9 @@ def _run_export(
             chunk_split_sentences=chunk_split_sentences,
             chunk_fence_aware=chunk_fence_aware,
             chunk_heading_path_mode=chunk_heading_path_mode,
+            bundling_mode=profile.bundling_mode,
+            destination=profile.destination,
+            embedding_model=profile.embedding_model,
             progress_callback=on_progress,
         )
     except Exception as exc:  # noqa: BLE001 - show top-level export failures in the UI
@@ -2322,6 +2366,79 @@ def _render_status() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _render_appeals_export(profile: Profile) -> None:
+    """Package FEMA appeals straight from a pa_rag SQLite database.
+
+    The appeals source bypasses the folder scan/review flow (those screens are
+    folder-specific), so this is a self-contained panel: point it at a
+    ``pa_appeals.sqlite3`` and it runs the same backend as the CLI's
+    ``--appeals-db`` with the current profile's target/mode/chunking/destination
+    settings.
+    """
+    with st.expander("Package FEMA appeals from a pa_rag database", expanded=False):
+        st.caption(
+            "Reads finalized appeals from `final_appeal_authority` and renders one "
+            "Markdown document per appeal, then bundles/chunks them with the current "
+            "Target, Mode, Bundling mode, Destination, and chunk settings above. "
+            "This path does not use the folder scan/review screens."
+        )
+        profile.appeals_db = st.text_input(
+            "Appeals SQLite database path",
+            value=profile.appeals_db,
+            help="Path to pa_appeals.sqlite3.",
+            key=_key("appeals_db"),
+        )
+        db_text = profile.appeals_db.strip()
+        if st.button("Package appeals", type="primary", disabled=not db_text):
+            db_path = Path(db_text).expanduser()
+            if not db_path.is_file():
+                st.error(f"Appeals database does not exist or is not a file: {db_path}")
+                return
+            output_dir = _resolved_output_path(profile)
+            project_name = profile.project_name.strip() or db_path.stem or "appeals"
+            max_bundle_tokens = _resolved_max_bundle_tokens(profile)
+            messages: List[str] = []
+            log_placeholder = st.empty()
+
+            def on_progress(event: ProgressEvent) -> None:
+                if event.message:
+                    messages.append(event.message)
+                    log_placeholder.code("\n".join(messages[-12:]), language="text")
+
+            try:
+                result = run_packaging_job(
+                    appeals_db=db_path,
+                    source_kind="appeals",
+                    output_dir=output_dir,
+                    project_name=project_name,
+                    target=profile.target,
+                    mode=profile.mode,
+                    max_bundle_tokens=max_bundle_tokens,
+                    chunk_token_budget=profile.chunk_token_budget,
+                    chunk_strategy=profile.chunk_strategy,
+                    chunk_heading_level=int(profile.chunk_heading_level),
+                    chunk_min_tokens=int(profile.chunk_min_tokens),
+                    chunk_overlap_tokens=int(profile.chunk_overlap_tokens),
+                    chunk_split_sentences=bool(profile.chunk_split_sentences),
+                    chunk_fence_aware=bool(profile.chunk_fence_aware),
+                    chunk_heading_path_mode=profile.chunk_heading_path_mode,
+                    bundling_mode=profile.bundling_mode,
+                    destination=profile.destination,
+                    embedding_model=profile.embedding_model,
+                    progress_callback=on_progress,
+                )
+            except Exception as exc:  # noqa: BLE001 - surface failures in the UI
+                st.error(f"Appeals export failed: {exc}")
+                return
+
+            st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = result
+            st.success(
+                f"Packaged {result.processed_count} appeal documents "
+                f"({result.failed_count} failed) into {result.export_dir.name}."
+            )
+            _render_export_result(profile.target, result)
+
+
 def main() -> None:
     st.set_page_config(page_title=PAGE_TITLE, layout="wide")
     _ensure_session_state()
@@ -2335,6 +2452,7 @@ def main() -> None:
     _render_packaging(profile)
     _render_advanced(profile)
     _render_save(profile)
+    _render_appeals_export(profile)
     _render_scan_audit(profile)
     _render_status()
 

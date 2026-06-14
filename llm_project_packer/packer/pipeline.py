@@ -9,9 +9,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import presets
+from .appeals_source import load_appeal_docs
 from .bundler import (
     ConvertedDoc,
     make_converted_doc,
+    split_doc_at_headings,
     split_into_bundles,
     write_bundle,
 )
@@ -27,10 +29,12 @@ from .config import PackerConfig
 from .exporters import (
     InstructionContext,
     assign_bundles_to_manifest,
+    write_corpus_overview,
     write_cowork_bundle,
     write_instructions,
     write_rag_export,
 )
+from .guidance import guidance_for_destination
 from .manifest import Manifest, ManifestEntry
 from .markdown_utils import doc_id_for_index, safe_filename
 from .readers import ReaderContext, read_file
@@ -68,7 +72,7 @@ class PackResult:
 
 
 def run_packaging_job(
-    source_dir,
+    source_dir=None,
     output_dir=Path("./llm_project_exports"),
     project_name: Optional[str] = None,
     target: str = "chatgpt",
@@ -78,6 +82,11 @@ def run_packaging_job(
     exclude_dirs: Optional[Iterable[str]] = None,
     included_files: Optional[Iterable[Path | str]] = None,
     exclude_files: Optional[Sequence[str]] = None,
+    source_kind: str = "folder",
+    appeals_db: Optional[Path | str] = None,
+    bundling_mode: str = "greedy",
+    destination: str = "",
+    embedding_model: str = "",
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -139,7 +148,23 @@ def run_packaging_job(
     not move boundaries, so it never affects chunk indices or selections.
     """
     del options
-    source_path = Path(source_dir).expanduser().resolve()
+    appeals_db_path = (
+        Path(appeals_db).expanduser().resolve() if appeals_db else None
+    )
+    if appeals_db_path is not None:
+        source_kind = "appeals"
+    if source_kind == "appeals":
+        if appeals_db_path is None:
+            raise ValueError(
+                "appeals source requires appeals_db=<path to pa_appeals.sqlite3>."
+            )
+        source_path = appeals_db_path.parent
+        default_project = appeals_db_path.stem or "appeals"
+    else:
+        if source_dir is None:
+            raise ValueError("source_dir is required for the folder source.")
+        source_path = Path(source_dir).expanduser().resolve()
+        default_project = source_path.name or "project"
     output_path = Path(output_dir).expanduser().resolve()
     included_file_list = tuple(included_files) if included_files is not None else None
     include_exts = _normalize_extensions(include_extensions) or presets.DEFAULT_INCLUDE_EXTENSIONS
@@ -152,10 +177,15 @@ def run_packaging_job(
         output_dir=output_path,
         target=target,
         mode=mode,
-        project_name=project_name or source_path.name or "project",
+        project_name=project_name or default_project,
         max_bundle_tokens=max_tokens,
         include_extensions=include_exts,
         exclude_dirs=exclude,
+        source_kind=source_kind,
+        appeals_db=appeals_db_path,
+        bundling_mode=bundling_mode,
+        destination=destination,
+        embedding_model=embedding_model,
     )
     cfg.validate()
     return run_packaging_config(
@@ -218,30 +248,13 @@ def run_packaging_config(
     warnings: List[str] = []
     errors: List[str] = []
 
-    emit("scan_start", "Scanning files...")
-    scan_exclude_dirs = set(cfg.exclude_dirs)
-    if _path_is_relative_to(cfg.output_dir, cfg.source_dir):
-        scan_exclude_dirs.add(cfg.output_dir.name)
-        emit("scan_skip_output", f"  Skipping output directory during scan: {cfg.output_dir.name}")
-
-    files = scan_directory(
-        source_dir=cfg.source_dir,
-        include_extensions=cfg.include_extensions,
-        exclude_dirs=tuple(scan_exclude_dirs),
+    manifest = Manifest(
+        project_name=cfg.project_name,
+        target=cfg.target,
+        mode=cfg.mode,
     )
-    files, include_warnings = _apply_included_files_filter(files, included_files, cfg.source_dir)
-    warnings.extend(include_warnings)
-    for warning in include_warnings:
-        emit("warning", f"  Warning: {warning}")
-    if exclude_files:
-        files, exclude_warnings = _apply_excluded_files_filter(files, exclude_files)
-        warnings.extend(exclude_warnings)
-        for warning in exclude_warnings:
-            emit("warning", f"  Warning: {warning}")
 
-    emit("scan_done", f"  Found {len(files)} files to record/process.", {"count": len(files)})
-    if not files:
-        emit("no_files", "No matching files found. Nothing to do.")
+    def _empty_result() -> PackResult:
         return PackResult(
             export_dir=export_dir,
             instruction_path=None,
@@ -256,17 +269,56 @@ def run_packaging_config(
             errors=errors,
         )
 
-    manifest = Manifest(
-        project_name=cfg.project_name,
-        target=cfg.target,
-        mode=cfg.mode,
-    )
-    reader_ctx = ReaderContext(
-        source_root=cfg.source_dir,
-        assets_dir=assets_dir,
-        data_dir=data_dir,
-    )
-    converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
+    if cfg.source_kind == "appeals":
+        emit("scan_start", f"Loading appeals from {cfg.appeals_db}...")
+        converted_docs = load_appeal_docs(
+            cfg.appeals_db,
+            manifest,
+            warnings=warnings,
+            errors=errors,
+            emit=emit,
+        )
+        emit(
+            "scan_done",
+            f"  Loaded {len(converted_docs)} appeal documents.",
+            {"count": len(converted_docs)},
+        )
+        if not converted_docs:
+            emit("no_files", "No appeals found in the database. Nothing to do.")
+            return _empty_result()
+    else:
+        emit("scan_start", "Scanning files...")
+        scan_exclude_dirs = set(cfg.exclude_dirs)
+        if _path_is_relative_to(cfg.output_dir, cfg.source_dir):
+            scan_exclude_dirs.add(cfg.output_dir.name)
+            emit("scan_skip_output", f"  Skipping output directory during scan: {cfg.output_dir.name}")
+
+        files = scan_directory(
+            source_dir=cfg.source_dir,
+            include_extensions=cfg.include_extensions,
+            exclude_dirs=tuple(scan_exclude_dirs),
+        )
+        files, include_warnings = _apply_included_files_filter(files, included_files, cfg.source_dir)
+        warnings.extend(include_warnings)
+        for warning in include_warnings:
+            emit("warning", f"  Warning: {warning}")
+        if exclude_files:
+            files, exclude_warnings = _apply_excluded_files_filter(files, exclude_files)
+            warnings.extend(exclude_warnings)
+            for warning in exclude_warnings:
+                emit("warning", f"  Warning: {warning}")
+
+        emit("scan_done", f"  Found {len(files)} files to record/process.", {"count": len(files)})
+        if not files:
+            emit("no_files", "No matching files found. Nothing to do.")
+            return _empty_result()
+
+        reader_ctx = ReaderContext(
+            source_root=cfg.source_dir,
+            assets_dir=assets_dir,
+            data_dir=data_dir,
+        )
+        converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
     effective_chunk_tokens = chunk_token_budget or cfg.max_bundle_tokens
     if chunk_min_tokens and chunk_min_tokens >= effective_chunk_tokens:
         warning = (
@@ -298,6 +350,15 @@ def run_packaging_config(
     if cfg.target not in chunked_targets:
         emit("blank", "")
         emit("bundle_start", "Bundling documents...")
+        if cfg.bundling_mode == "medium":
+            converted_docs = _prepare_medium_docs(
+                converted_docs,
+                manifest,
+                cfg.max_bundle_tokens,
+                chunk_heading_level,
+                emit,
+                warnings,
+            )
         bundles = split_into_bundles(converted_docs, cfg.max_bundle_tokens)
         emit("bundle_done", f"  Created {len(bundles)} bundles.", {"count": len(bundles)})
         for bundle in bundles:
@@ -318,6 +379,11 @@ def run_packaging_config(
                 {"path": path, "tokens": bundle.total_tokens, "doc_count": len(bundle.docs)},
             )
         assign_bundles_to_manifest(manifest, bundles)
+        if cfg.bundling_mode == "medium":
+            overview_path = write_corpus_overview(
+                export_dir, cfg.project_name, manifest, bundles
+            )
+            emit("overview_written", f"  Wrote {overview_path.name}.", {"path": overview_path})
     else:
         emit("blank", "")
         emit(
@@ -351,6 +417,7 @@ def run_packaging_config(
                 export_dir=export_dir,
                 project_name=cfg.project_name,
                 rag_dir=rag_dir,
+                embedding_model=cfg.embedding_model,
             )
             emit(
                 "cowork_written",
@@ -378,6 +445,8 @@ def run_packaging_config(
         total_documents=len(manifest.entries),
         total_tokens=total_tokens,
         max_bundle_tokens=cfg.max_bundle_tokens,
+        destination=cfg.destination,
+        guidance_lines=guidance_for_destination(cfg.destination),
     )
     instruction_path = write_instructions(cfg.target, export_dir, instruction_ctx)
     emit("instruction_written", f"  Wrote {instruction_path.name}.", {"path": instruction_path})
@@ -397,6 +466,53 @@ def run_packaging_config(
         warnings=warnings,
         errors=errors,
     )
+
+
+def _prepare_medium_docs(
+    converted_docs: List[ConvertedDoc],
+    manifest: Manifest,
+    budget: int,
+    heading_level: int,
+    emit: Callable[[str, str, Optional[Dict[str, Any]]], None],
+    warnings: List[str],
+) -> List[ConvertedDoc]:
+    """Split any over-budget document at headings for the medium bundling mode.
+
+    Keeps the manifest consistent: an over-budget document's entry is replaced
+    in place by one entry per heading-split part (each ``status="ok"`` with an
+    explanatory note). Documents within budget, or over-budget documents with
+    no headings to split on, are passed through unchanged.
+    """
+    prepared: List[ConvertedDoc] = []
+    for doc in converted_docs:
+        parts = split_doc_at_headings(doc, budget, heading_level)
+        if len(parts) <= 1:
+            prepared.append(doc)
+            if doc.token_estimate > budget:
+                warning = (
+                    f"{doc.entry.doc_id} ({doc.entry.source_file}) is "
+                    f"{doc.token_estimate:,} tokens, over the {budget:,}-token "
+                    "budget, and has no headings to split on; kept whole."
+                )
+                warnings.append(warning)
+                emit("warning", f"  Warning: {warning}")
+            continue
+        idx = next(
+            (i for i, e in enumerate(manifest.entries) if e.doc_id == doc.entry.doc_id),
+            None,
+        )
+        part_entries = [part.entry for part in parts]
+        if idx is not None:
+            manifest.entries[idx : idx + 1] = part_entries
+        else:  # pragma: no cover - defensive
+            manifest.entries.extend(part_entries)
+        prepared.extend(parts)
+        emit(
+            "medium_split",
+            f"  Split {doc.entry.doc_id} into {len(parts)} parts (over budget).",
+            {"doc_id": doc.entry.doc_id, "parts": len(parts)},
+        )
+    return prepared
 
 
 def _convert_files(

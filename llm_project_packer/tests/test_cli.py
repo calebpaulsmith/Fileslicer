@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import shutil
+import sqlite3
 import sys
 import unittest
 import uuid
@@ -218,6 +219,87 @@ class CliTestCase(unittest.TestCase):
         )
         self.assertEqual(code, 0)
         self.assertIn("_generic_lean_", self._single_export_dir().name)
+
+    def _build_appeals_db(self) -> Path:
+        db = self.tmp_dir / "appeals.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.execute(
+            "CREATE TABLE final_appeal_authority "
+            "(final_id INTEGER, html_id INTEGER, final_title TEXT, "
+            "final_appellant TEXT, final_recipient TEXT, final_pa_id TEXT, "
+            "final_disaster_number_raw TEXT, final_disaster_number_norm TEXT, "
+            "final_decision_signed_date TEXT, final_declaration_date TEXT, "
+            "final_pw_gmp_compact TEXT, final_gmp_number TEXT, final_pw_number TEXT, "
+            "final_region TEXT, final_status TEXT, final_summary_text TEXT, "
+            "final_analysis_text TEXT, final_conclusion_text TEXT, final_letter_text TEXT, "
+            "final_headnotes_text TEXT, final_authorities_text TEXT, "
+            "final_footnotes_text TEXT, final_body_text TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO final_appeal_authority (final_id, final_title, final_summary_text) "
+            "VALUES (1, 'Alpha Appeal', 'Summary body.')"
+        )
+        conn.commit()
+        conn.close()
+        return db
+
+    def test_appeals_db_standalone_run(self) -> None:
+        db = self._build_appeals_db()
+        code, _, _ = self._run_main(
+            [
+                "--appeals-db",
+                str(db),
+                "--target",
+                "chatgpt",
+                "--mode",
+                "balanced",
+                "--output",
+                str(self.output_dir),
+            ]
+        )
+        self.assertEqual(code, 0)
+        export_dir = self._single_export_dir()
+        self.assertIn("appeals_chatgpt_balanced_", export_dir.name)
+        manifest_text = (export_dir / "manifest.json").read_text(encoding="utf-8")
+        self.assertIn("appeal_1_Alpha_Appeal.md", manifest_text)
+        bundle_text = (export_dir / "02_BUNDLE_001.md").read_text(encoding="utf-8")
+        self.assertIn("# Alpha Appeal", bundle_text)
+
+    def test_appeals_db_with_destination_profile(self) -> None:
+        db = self._build_appeals_db()
+        code, _, _ = self._run_main(
+            [
+                "--profile",
+                "DHS / ChatGPT Enterprise",
+                "--appeals-db",
+                str(db),
+                "--profiles-dir",
+                str(self.profiles_dir),
+                "--output",
+                str(self.output_dir),
+            ]
+        )
+        self.assertEqual(code, 0)
+        export_dir = self._single_export_dir()
+        self.assertTrue((export_dir / "00_CORPUS_OVERVIEW.md").exists())
+        instr = (export_dir / "00_CHATGPT_PROJECT_INSTRUCTIONS.md").read_text(encoding="utf-8")
+        self.assertIn("Packaging guidance for this destination", instr)
+
+    def test_missing_appeals_db_exits_2(self) -> None:
+        code, _, stderr = self._run_main(
+            [
+                "--appeals-db",
+                str(self.tmp_dir / "nope.sqlite3"),
+                "--target",
+                "rag",
+                "--mode",
+                "balanced",
+                "--output",
+                str(self.output_dir),
+            ]
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("Appeals database does not exist", stderr)
 
 
 if __name__ == "__main__":

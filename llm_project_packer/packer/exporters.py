@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
@@ -24,8 +24,9 @@ from .chunking import (
     heading_paths_for_texts,
     merge_undersized_chunks,
 )
+from .guidance import DESTINATION_LABELS
 from .manifest import Manifest
-from .markdown_utils import safe_filename
+from .markdown_utils import rows_to_markdown_table, safe_filename
 from .token_estimator import estimate_tokens, estimator_backend
 
 
@@ -45,6 +46,24 @@ class InstructionContext:
     total_documents: int
     total_tokens: int
     max_bundle_tokens: int
+    destination: str = ""
+    guidance_lines: List[str] = field(default_factory=list)
+
+
+def _guidance_block(ctx: InstructionContext) -> List[str]:
+    """Render the per-destination guidance section, or nothing if unset."""
+    if not ctx.guidance_lines:
+        return []
+    label = DESTINATION_LABELS.get(ctx.destination, ctx.destination)
+    lines = [
+        "## Packaging guidance for this destination",
+        "",
+        f"Optimized for: **{label}**",
+        "",
+    ]
+    lines += [f"- {item}" for item in ctx.guidance_lines]
+    lines.append("")
+    return lines
 
 
 _DISCLAIMER = (
@@ -97,6 +116,7 @@ def _common_header(ctx: InstructionContext, title: str) -> List[str]:
 
 def _write_chatgpt(output_dir: Path, ctx: InstructionContext) -> Path:
     lines = _common_header(ctx, f"ChatGPT Project Instructions — {ctx.project_name}")
+    lines += _guidance_block(ctx)
     lines += [
         "## How to use this export in a ChatGPT Project",
         "",
@@ -140,6 +160,7 @@ def _write_chatgpt(output_dir: Path, ctx: InstructionContext) -> Path:
 
 def _write_claude(output_dir: Path, ctx: InstructionContext) -> Path:
     lines = _common_header(ctx, f"Claude Project Instructions — {ctx.project_name}")
+    lines += _guidance_block(ctx)
     lines += [
         "## How to use this export in a Claude Project",
         "",
@@ -182,6 +203,7 @@ def _write_claude(output_dir: Path, ctx: InstructionContext) -> Path:
 
 def _write_generic(output_dir: Path, ctx: InstructionContext) -> Path:
     lines = _common_header(ctx, f"Generic LLM Instructions — {ctx.project_name}")
+    lines += _guidance_block(ctx)
     lines += [
         "## How to use this export with a generic LLM chat",
         "",
@@ -230,6 +252,7 @@ def _write_cowork_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         f"- **Per-chunk token budget:** {ctx.max_bundle_tokens:,}",
         f"- **Token estimator backend:** {estimator_backend()}",
         "",
+        *_guidance_block(ctx),
         "## What this export contains",
         "",
         "- `01_SOURCE_MANIFEST.md` / `manifest.csv` / `manifest.json` — the canonical document list.",
@@ -284,6 +307,7 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         f"- **Per-chunk token budget:** {ctx.max_bundle_tokens:,}",
         f"- **Token estimator backend:** {estimator_backend()}",
         "",
+        *_guidance_block(ctx),
         "## What this export contains",
         "",
         "- `01_SOURCE_MANIFEST.md` / `manifest.csv` / `manifest.json` —"
@@ -305,6 +329,10 @@ def _write_rag_notes(output_dir: Path, ctx: InstructionContext) -> Path:
         "- `heading_path` — (only when the heading-breadcrumb metadata mode is on)"
         " the list of enclosing headings above the chunk, outermost first; use it"
         " to cite or filter chunks by section.",
+        "- `metadata` — (only for record sources such as the FEMA appeals database)"
+        " a per-document object of structured fields (e.g. appellant, PA ID,"
+        " disaster, decision date, region, status, and cited authorities); use it"
+        " for metadata filtering and citation.",
         "",
         "Chunks are split greedily by paragraph against the per-chunk token budget "
         "(or at headings when the heading strategy is selected). Chunk size, strategy, "
@@ -348,6 +376,49 @@ def _write(path: Path, lines: List[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
     return path
+
+
+def write_corpus_overview(
+    output_dir: Path,
+    project_name: str,
+    manifest: Manifest,
+    bundles: List[Bundle],
+) -> Path:
+    """Write ``00_CORPUS_OVERVIEW.md`` — a front-of-corpus index of every document.
+
+    Used by the medium-grained bundling mode so the destination's retriever (and
+    the reader) sees an overview/index first: which document landed in which
+    bundle, with key identity columns. Sorts among the ``00_*`` instruction
+    files, ahead of the bundles.
+    """
+    bundle_by_doc = {
+        doc_id: bundle.filename for bundle in bundles for doc_id in bundle.doc_ids
+    }
+    ok_entries = [e for e in manifest.entries if e.status == "ok"]
+    lines: List[str] = [
+        f"# Corpus Overview — {project_name}",
+        "",
+        f"- **Documents:** {len(ok_entries)}",
+        f"- **Bundles:** {len(bundles)}",
+        f"- **Estimated total tokens:** {sum(e.token_estimate for e in ok_entries):,}",
+        "",
+        "This index lists every packaged document and the bundle it lives in. "
+        "Read it first to locate a source, then open the named bundle.",
+        "",
+    ]
+    headers = ["DOC_ID", "Source File", "Tokens", "Bundle"]
+    rows = [
+        (
+            e.doc_id,
+            e.source_file,
+            f"{e.token_estimate:,}",
+            bundle_by_doc.get(e.doc_id, "-"),
+        )
+        for e in ok_entries
+    ]
+    lines.append(rows_to_markdown_table(headers, rows))
+    lines.append("")
+    return _write(output_dir / "00_CORPUS_OVERVIEW.md", lines)
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +513,8 @@ def write_rag_export(
                 }
                 if want_metadata:
                     payload["heading_path"] = list(path)
+                if doc.metadata:
+                    payload["metadata"] = doc.metadata
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 chunk_ids.append(chunk_id)
             source_map[doc.entry.doc_id] = {
@@ -481,12 +554,16 @@ def write_cowork_bundle(
     export_dir: Path,
     project_name: str,
     rag_dir: Path,
+    embedding_model: str = "",
 ) -> Path:
     """Build the ``mcp_server/`` directory next to the RAG export.
 
     Reads ``rag_dir / chunks.jsonl`` and writes an FTS5-indexed SQLite database
     plus a self-contained FastMCP stdio server script that serves the bundle
-    as MCP tools. Returns the path to the generated ``mcp_server/`` directory.
+    as MCP tools. When ``embedding_model`` resolves to a usable embedder, every
+    chunk is also embedded into a vector index so the server exposes vector and
+    hybrid (BM25 + vector, RRF) search; otherwise the server degrades to FTS5
+    keyword search. Returns the path to the generated ``mcp_server/`` directory.
     """
     mcp_dir = export_dir / "mcp_server"
     mcp_dir.mkdir(parents=True, exist_ok=True)
@@ -498,15 +575,31 @@ def write_cowork_bundle(
     chunks_path = rag_dir / "chunks.jsonl"
 
     _build_fts_index(index_path, chunks_path)
+    meta = _build_vector_index(index_path, embedding_model)
+    _copy_embedder_module(mcp_dir)
 
     safe_project = safe_filename(project_name) or "project"
     server_id = f"fileslicer_{safe_project}"
     server_path.write_text(_render_server_script(project_name, server_id), encoding="utf-8")
-    requirements_path.write_text("mcp[cli]>=1.0\n", encoding="utf-8")
+    requirements_path.write_text(
+        "mcp[cli]>=1.0\n# Optional, only for the embedder chosen at export time:\n"
+        "# openai>=1.0           # for --embedding-model openai:...\n"
+        "# voyageai>=0.2         # for --embedding-model voyage:...\n"
+        "# sentence-transformers # for --embedding-model local:...\n",
+        encoding="utf-8",
+    )
     config_path.write_text(_render_cowork_config(server_id, server_path), encoding="utf-8")
-    readme_path.write_text(_render_server_readme(project_name, server_id), encoding="utf-8")
+    readme_path.write_text(
+        _render_server_readme(project_name, server_id, meta), encoding="utf-8"
+    )
 
     return mcp_dir
+
+
+def _copy_embedder_module(mcp_dir: Path) -> None:
+    """Copy ``packer/embedder.py`` into the server dir so it can embed queries."""
+    source = Path(__file__).resolve().parent / "embedder.py"
+    (mcp_dir / "embedder.py").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
 
 
 def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
@@ -523,7 +616,8 @@ def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
                 source_path   TEXT,
                 token_estimate INTEGER,
                 ordinal       INTEGER,
-                text          TEXT
+                text          TEXT,
+                metadata      TEXT
             );
             CREATE INDEX idx_chunks_doc_id ON chunks(doc_id, ordinal);
             CREATE VIRTUAL TABLE chunks_fts USING fts5(
@@ -549,9 +643,10 @@ def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
                     doc_id = payload.get("doc_id", "")
                     ordinal = doc_ordinals.get(doc_id, 0)
                     doc_ordinals[doc_id] = ordinal + 1
+                    metadata = payload.get("metadata")
                     conn.execute(
                         "INSERT INTO chunks (chunk_id, doc_id, source_file, source_path,"
-                        " token_estimate, ordinal, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        " token_estimate, ordinal, text, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             payload.get("chunk_id", ""),
                             doc_id,
@@ -560,6 +655,7 @@ def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
                             int(payload.get("token_estimate") or 0),
                             ordinal,
                             payload.get("text", ""),
+                            json.dumps(metadata, ensure_ascii=False) if metadata else None,
                         ),
                     )
                     conn.execute(
@@ -577,6 +673,54 @@ def _build_fts_index(index_path: Path, chunks_path: Path) -> None:
         conn.close()
 
 
+def _build_vector_index(index_path: Path, embedding_model: str) -> Optional[dict]:
+    """Embed every chunk and store float32 vectors + embedder metadata in the index.
+
+    Returns the embedder metadata dict on success, or ``None`` if embedding was
+    skipped (no chunks) or failed (missing dependency/key) — in which case the
+    server falls back to FTS5-only retrieval. Never raises: a failed embedder
+    must not break the export (it degrades to keyword search).
+    """
+    from array import array
+
+    from .embedder import build_embedder_from_meta, embedder_meta, resolve_embedder
+
+    try:
+        embedder = resolve_embedder(embedding_model)
+    except Exception:  # noqa: BLE001 - degrade to FTS5-only
+        return None
+
+    conn = sqlite3.connect(str(index_path))
+    try:
+        rows = conn.execute("SELECT chunk_id, text FROM chunks ORDER BY rowid").fetchall()
+        if not rows:
+            return None
+        texts = [r[1] or "" for r in rows]
+        try:
+            vectors = embedder.embed(texts)
+        except Exception:  # noqa: BLE001 - degrade to FTS5-only
+            return None
+        conn.execute(
+            "CREATE TABLE vectors (chunk_id TEXT PRIMARY KEY, vector BLOB)"
+        )
+        conn.execute("CREATE TABLE embedder_meta (key TEXT PRIMARY KEY, value TEXT)")
+        for (chunk_id, _text), vector in zip(rows, vectors):
+            conn.execute(
+                "INSERT INTO vectors (chunk_id, vector) VALUES (?, ?)",
+                (chunk_id, array("f", vector).tobytes()),
+            )
+        meta = embedder_meta(embedder)
+        for key, value in meta.items():
+            conn.execute(
+                "INSERT INTO embedder_meta (key, value) VALUES (?, ?)",
+                (key, json.dumps(value)),
+            )
+        conn.commit()
+        return meta
+    finally:
+        conn.close()
+
+
 def _render_cowork_config(server_id: str, server_path: Path) -> str:
     payload = {
         "mcpServers": {
@@ -589,12 +733,43 @@ def _render_cowork_config(server_id: str, server_path: Path) -> str:
     return json.dumps(payload, indent=2) + "\n"
 
 
-def _render_server_readme(project_name: str, server_id: str) -> str:
+def _render_server_readme(project_name: str, server_id: str, embedder_meta: Optional[dict]) -> str:
+    if embedder_meta:
+        embed_line = (
+            f"This bundle is embedded with **{embedder_meta.get('backend')}:"
+            f"{embedder_meta.get('model')}** ({embedder_meta.get('dim')} dims), so the\n"
+            "server also exposes `vector_search` and `hybrid_search`. To query, the\n"
+            "server re-embeds your query with the same backend"
+        )
+        if embedder_meta.get("backend") in ("openai", "voyage"):
+            embed_line += (
+                ", which needs the matching API key in the environment "
+                f"(`{ 'OPENAI_API_KEY' if embedder_meta.get('backend') == 'openai' else 'VOYAGE_API_KEY' }`)"
+                " and the provider package installed. Without them, hybrid/vector tools\n"
+                "fall back to keyword search."
+            )
+        else:
+            embed_line += " (offline; no key needed)."
+        embed_block = "\n## Retrieval\n\n" + embed_line + "\n"
+        tool_lines = (
+            "- `search` — SQLite FTS5 keyword search across chunks, ranked by BM25.\n"
+            "- `vector_search` — nearest-neighbour search over the embedded chunks.\n"
+            "- `hybrid_search` — fuses BM25 and vector results with Reciprocal Rank Fusion.\n"
+        )
+    else:
+        embed_block = (
+            "\n## Retrieval\n\nThis bundle was exported without embeddings, so the server\n"
+            "provides keyword (`search`) retrieval only. Re-export with an embedding model\n"
+            "(`--embedding-model hashing` or `--embedding-model openai:text-embedding-3-small`)\n"
+            "to enable vector and hybrid search.\n"
+        )
+        tool_lines = "- `search` — SQLite FTS5 keyword search across chunks, ranked by BM25.\n"
     return (
         f"# MCP server for {project_name}\n\n"
         "This directory is a self-contained MCP server generated by\n"
         "`llm_project_packer --target cowork`. It exposes the bundle in this\n"
-        "export folder to any MCP-aware client (Claude Desktop, Cowork, etc.).\n\n"
+        "export folder to any MCP-aware client (Claude Desktop, Cowork, etc.).\n"
+        f"{embed_block}\n"
         "## One-time setup\n\n"
         "```powershell\n"
         "pip install -r requirements.txt\n"
@@ -606,13 +781,215 @@ def _render_server_readme(project_name: str, server_id: str) -> str:
         "## Tools provided\n\n"
         "- `list_documents` — list manifest rows.\n"
         "- `get_document` — return one document's full text.\n"
-        "- `search` — SQLite FTS5 keyword search across chunks, ranked by BM25.\n"
+        f"{tool_lines}"
         "- `get_chunk` — return one chunk plus the previous/next chunk ids.\n"
         "- `get_asset_path` — return the absolute local path of an asset or data file.\n\n"
         "Moving or renaming this folder is fine; the server resolves paths at runtime.\n"
         "If you move it, regenerate `cowork_config.json` or update the `args` path inside\n"
         "your MCP config to point at the new `server.py` location.\n"
     )
+
+
+# Retrieval tools appended to the generated server. Kept as a plain (non-f)
+# string so its braces need no escaping.
+_SERVER_RETRIEVAL_TOOLS = '''
+
+def _table_exists(name: str) -> bool:
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (name,)
+        ).fetchone()
+    return row is not None
+
+
+_EMBEDDER = None
+_EMBEDDER_TRIED = False
+
+
+def _embedder():
+    """Lazily build the embedder recorded in the index (or None if unavailable)."""
+    global _EMBEDDER, _EMBEDDER_TRIED
+    if _EMBEDDER_TRIED:
+        return _EMBEDDER
+    _EMBEDDER_TRIED = True
+    if not _table_exists("embedder_meta"):
+        return None
+    try:
+        with _connect() as conn:
+            rows = conn.execute("SELECT key, value FROM embedder_meta").fetchall()
+        meta = {r["key"]: json.loads(r["value"]) for r in rows}
+        if str(SERVER_DIR) not in sys.path:
+            sys.path.insert(0, str(SERVER_DIR))
+        from embedder import build_embedder_from_meta
+
+        _EMBEDDER = build_embedder_from_meta(meta)
+    except Exception:
+        _EMBEDDER = None
+    return _EMBEDDER
+
+
+def _cosine(a, b) -> float:
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0 or nb <= 0:
+        return 0.0
+    return dot / math.sqrt(na * nb)
+
+
+def _chunk_meta(value):
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _vector_ranked(query: str, pool: int):
+    embedder = _embedder()
+    if embedder is None or not _table_exists("vectors"):
+        return None
+    try:
+        qv = embedder.embed([query], is_query=True)[0]
+    except Exception:
+        return None
+    scored = []
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT v.chunk_id AS chunk_id, v.vector AS vector, c.doc_id AS doc_id,"
+            " c.source_file AS source_file, c.text AS text, c.metadata AS metadata"
+            " FROM vectors v JOIN chunks c ON c.chunk_id = v.chunk_id"
+        ).fetchall()
+    for r in rows:
+        vec = array("f")
+        vec.frombytes(r["vector"])
+        scored.append((_cosine(qv, vec), r))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return scored[:pool]
+
+
+def _bm25_ranked(query: str, pool: int):
+    fts_query = _escape_fts_query(query)
+    if not fts_query:
+        return []
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT chunk_id, doc_id, source_file, bm25(chunks_fts) AS score"
+            " FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY score ASC LIMIT ?",
+            (fts_query, pool),
+        ).fetchall()
+
+
+@mcp.tool()
+def vector_search(query: str, limit: int = 10) -> Dict[str, Any]:
+    """Nearest-neighbour search over the embedded chunks (cosine similarity).
+
+    Requires that this bundle was exported with an embedding model. Returns
+    ``available=False`` with an empty hit list when no vector index is present
+    or the embedder cannot be loaded (use ``search`` for keyword retrieval).
+    """
+    capped = max(1, min(int(limit or 10), 100))
+    ranked = _vector_ranked(query, capped)
+    if ranked is None:
+        return {
+            "query": query,
+            "available": False,
+            "hits": [],
+            "note": "No vector index or embedder unavailable; use search().",
+        }
+    hits = []
+    for score, r in ranked:
+        text = r["text"] or ""
+        hits.append(
+            {
+                "chunk_id": r["chunk_id"],
+                "doc_id": r["doc_id"],
+                "source_file": r["source_file"],
+                "score": round(float(score), 6),
+                "metadata": _chunk_meta(r["metadata"]),
+                "snippet": text[:240],
+            }
+        )
+    return {"query": query, "available": True, "hit_count": len(hits), "hits": hits}
+
+
+def _maybe_rerank(query: str, hits: List[Dict[str, Any]]):
+    """Optionally re-score hits with a cross-encoder; no-op without the dependency."""
+    if not hits:
+        return hits, False
+    try:
+        from sentence_transformers import CrossEncoder
+    except Exception:
+        return hits, False
+    try:
+        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        scores = model.predict([(query, h["snippet"]) for h in hits])
+        order = sorted(range(len(hits)), key=lambda i: float(scores[i]), reverse=True)
+        reranked = [dict(hits[i], rerank_score=round(float(scores[i]), 6)) for i in order]
+        return reranked, True
+    except Exception:
+        return hits, False
+
+
+@mcp.tool()
+def hybrid_search(query: str, limit: int = 10, rerank: bool = False) -> Dict[str, Any]:
+    """Hybrid retrieval: fuse BM25 keyword and vector rankings via Reciprocal Rank Fusion.
+
+    Falls back to keyword-only ranking when no vector index is available. When
+    ``rerank`` is true and the optional ``sentence-transformers`` package is
+    installed, the fused results are re-scored with a cross-encoder; otherwise
+    the fused order is returned unchanged.
+    """
+    capped = max(1, min(int(limit or 10), 100))
+    pool = max(capped * 5, 50)
+    k = 60
+    scores: Dict[str, float] = {}
+    for rank, r in enumerate(_bm25_ranked(query, pool)):
+        scores[r["chunk_id"]] = scores.get(r["chunk_id"], 0.0) + 1.0 / (k + rank + 1)
+    vec = _vector_ranked(query, pool)
+    used_vectors = vec is not None
+    if vec:
+        for rank, (_score, r) in enumerate(vec):
+            scores[r["chunk_id"]] = scores.get(r["chunk_id"], 0.0) + 1.0 / (k + rank + 1)
+    if not scores:
+        return {"query": query, "used_vectors": used_vectors, "hit_count": 0, "hits": []}
+    top_ids = sorted(scores, key=lambda cid: scores[cid], reverse=True)[:capped]
+    hits = []
+    with _connect() as conn:
+        for cid in top_ids:
+            row = conn.execute(
+                "SELECT chunk_id, doc_id, source_file, text, metadata FROM chunks WHERE chunk_id = ?",
+                (cid,),
+            ).fetchone()
+            if row is None:
+                continue
+            text = row["text"] or ""
+            hits.append(
+                {
+                    "chunk_id": row["chunk_id"],
+                    "doc_id": row["doc_id"],
+                    "source_file": row["source_file"],
+                    "rrf_score": round(scores[cid], 6),
+                    "metadata": _chunk_meta(row["metadata"]),
+                    "snippet": text[:240],
+                }
+            )
+    reranked = False
+    if rerank:
+        hits, reranked = _maybe_rerank(query, hits)
+    return {
+        "query": query,
+        "used_vectors": used_vectors,
+        "reranked": reranked,
+        "hit_count": len(hits),
+        "hits": hits,
+    }
+'''
 
 
 def _render_server_script(project_name: str, server_id: str) -> str:
@@ -631,7 +1008,10 @@ this script at runtime.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+import sys
+from array import array
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -825,7 +1205,7 @@ def get_asset_path(doc_id: str, name: str) -> Dict[str, Any]:
         except OSError:
             continue
     return {{"doc_id": doc_id, "name": name, "found": False, "path": None}}
-
+''' + _SERVER_RETRIEVAL_TOOLS + '''
 
 if __name__ == "__main__":
     mcp.run()

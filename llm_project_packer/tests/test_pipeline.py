@@ -41,6 +41,51 @@ class PipelineTests(unittest.TestCase):
         path.mkdir()
         return path
 
+    def test_medium_bundling_writes_overview_and_guidance(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "a.txt").write_text("Alpha content.", encoding="utf-8")
+            (source / "b.txt").write_text("Bravo content.", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="chatgpt",
+                mode="balanced",
+                bundling_mode="medium",
+                destination="chatgpt_enterprise",
+            )
+            overview = result.export_dir / "00_CORPUS_OVERVIEW.md"
+            self.assertTrue(overview.exists())
+            overview_text = overview.read_text(encoding="utf-8")
+            self.assertIn("Corpus Overview", overview_text)
+            # Manifest accounting stays consistent.
+            self.assertEqual(result.failed_count, 0)
+            self.assertEqual(result.processed_count, 2)
+            # Destination guidance lands in the instruction file.
+            instr_text = result.instruction_path.read_text(encoding="utf-8")
+            self.assertIn("Packaging guidance for this destination", instr_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_greedy_default_writes_no_overview_or_guidance(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "a.txt").write_text("Alpha content.", encoding="utf-8")
+
+            result = run_packaging_job(source, output, target="chatgpt", mode="balanced")
+            self.assertFalse((result.export_dir / "00_CORPUS_OVERVIEW.md").exists())
+            instr_text = result.instruction_path.read_text(encoding="utf-8")
+            self.assertNotIn("Packaging guidance for this destination", instr_text)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_run_packaging_job_returns_structured_result(self) -> None:
         root = self.make_tempdir()
         try:

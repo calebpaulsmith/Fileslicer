@@ -331,33 +331,112 @@ Already shipped:
   win); hand-written globs in profile JSON are honored at scan defaults
   and profile-driven exports but the UI rewrites the list with exact
   paths when the selection changes.
+- Appeals SQLite source, destination profiles, guidance, and medium-grained
+  bundling (the FEMA-appeals repurposing — see "Product vision"; an additive
+  CLI/backend change, folder-source behavior and byte-identical output
+  unchanged):
+  - `packer/appeals_source.py` reads FEMA second-appeal decisions directly
+    from a `pa_rag` SQLite database (`pa_appeals.sqlite3`) instead of scanning
+    a folder. `load_appeal_docs(db_path, manifest, ...)` queries the canonical
+    `final_appeal_authority` table (joined to `src_html_appeal` and the
+    `document_citation`/`citation_reference` tables for per-appeal cited
+    authorities) and renders one clean Markdown document per appeal —
+    identity header, then an "Appeal Overview" metadata block (appellant, PA
+    ID, disaster, dates, region, status, cited authorities), then the decision
+    prose (summary → analysis → conclusion → letter → headnotes → authorities
+    → footnotes, falling back to `final_body_text`). Appeals are ordered by
+    `final_id` so the assigned `DOC_xxxx` ids are stable across runs. Per-appeal
+    failures are isolated (rule 4): a bad row becomes a `status="failed"`
+    manifest entry and the run continues; a missing `final_appeal_authority`
+    table is a fatal `ValueError`. The pipeline branches on
+    `PackerConfig.source_kind` (`folder` default / `appeals`); everything from
+    bundling onward is the shared path. The DB is opened read-only.
+  - `packer/guidance.py` (`guidance_for_destination(destination)`) holds a
+    per-destination lever cheat-sheet (effective/inert/harmful) distilled from
+    the repo-root research docs, for the four destinations
+    `self_hosted_rag`/`claude_project`/`chatgpt_project`/`chatgpt_enterprise`.
+    The pipeline passes it into `InstructionContext.guidance_lines` and each
+    `00_*` instruction writer renders a "Packaging guidance for this
+    destination" section. Empty `destination` ⇒ no section ⇒ byte-identical.
+  - Medium-grained bundling (`bundling_mode="medium"`, default `"greedy"`):
+    `bundler.split_into_bundles_medium` / `split_doc_at_headings` first split
+    any over-budget document at major headings, then pack with the same greedy
+    packer and byte-identical numbering as `split_into_bundles`. The pipeline's
+    `_prepare_medium_docs` keeps the manifest consistent (an over-budget doc's
+    entry is replaced in place by one `*_pNN` part entry per heading split) and
+    writes a front-of-corpus `00_CORPUS_OVERVIEW.md` index
+    (`exporters.write_corpus_overview`). Intended for the ChatGPT Enterprise /
+    "DHS chat" destination, where one mega-bundle strands content past the
+    ~110K stuffing budget and microchunks fragment it.
+- Local embedding RAG (Phase B / V3 of the appeals repurpose; lifts the V2
+  embeddings exclusion — see Explicit exclusions):
+  - **Metadata-rich chunks.** `ConvertedDoc` carries an optional `metadata`
+    dict (`bundler.make_converted_doc(..., metadata=...)`); `appeals_source`
+    fills it with the appeal's appellant/recipient/PA-ID/disaster/date/region/
+    status/final_id/source_key plus the cited-authority list.
+    `exporters.write_rag_export` emits it as a `metadata` object on each
+    `rag_ready/chunks.jsonl` record **only when present**, so folder-sourced
+    RAG output stays byte-identical.
+  - **Pluggable embedder** (`packer/embedder.py`, self-contained, no `packer`
+    imports so it can be copied into a server): `resolve_embedder(spec)` builds
+    a `HashingEmbedder` (offline, deterministic, dependency-free — the default),
+    `OpenAIEmbedder`, `VoyageEmbedder`, or `SentenceTransformerEmbedder` (local
+    bge/e5) from a spec like `hashing`, `openai:text-embedding-3-small`,
+    `voyage:voyage-3`, or `local:bge-small-en-v1.5`. API and local backends
+    lazily import their package, read `OPENAI_API_KEY`/`VOYAGE_API_KEY` where
+    needed, and raise `EmbedderError` (caught upstream → FTS5-only) when
+    unavailable. `embed(texts, is_query=False)` applies asymmetric query/passage
+    handling where the model asks for it (e5/bge prefixes via `_local_prefix`,
+    Voyage `input_type`); the generated server passes `is_query=True` for
+    queries. `embedder_meta`/`build_embedder_from_meta` round-trip an embedder's
+    identity for storage in the index.
+  - **Hybrid cowork MCP server.** `run_packaging_job(embedding_model=...)` flows
+    to `exporters.write_cowork_bundle`, which (after the FTS5 index)
+    `_build_vector_index` embeds every chunk and stores float32 vectors +
+    `embedder_meta` in `index.sqlite`, copies `embedder.py` into `mcp_server/`,
+    and the generated `server.py` gains `vector_search` (cosine) and
+    `hybrid_search` (BM25 + vector fused with Reciprocal Rank Fusion, optional
+    cross-encoder `rerank` that degrades to a no-op without
+    `sentence-transformers`). The chunks table gains a `metadata` column. When
+    no embedder is available the server is FTS5-only and unchanged in spirit.
+    `embedding_model` defaults to `""` (no vectors) except for the
+    `Local Hybrid RAG` built-in (`hashing`). Embedding is the only step that may
+    call an external API, and only when the user opts into an API backend.
 - Project profile storage in `packer/profiles.py`:
-  - `Profile` dataclass (26 fields total) + `save_profile`,
+  - `Profile` dataclass (31 fields total) + `save_profile`,
     `load_profile`, `list_profiles`, `delete_profile`. JSON is stored under
     `~/.llm_project_packer/profiles/` by default; every function accepts a
     `profiles_dir` override so tests and a future UI can redirect the
     location.
   - `Profile.to_packaging_kwargs(source_dir=..., output_dir=...,
-    project_name=...)` returns kwargs ready for `run_packaging_job`. It
-    emits only the active fields and lets callers override
-    source/output/project at call time without mutating the profile.
-  - `profiles.ACTIVE_FIELDS` lists the eighteen fields that influence
+    project_name=..., appeals_db=...)` returns kwargs ready for
+    `run_packaging_job`. It emits only the active fields and lets callers
+    override source/output/project/appeals-db at call time without mutating the
+    profile. When the profile (or the `appeals_db` override) selects the
+    appeals source, a folder `source_dir` is not required.
+  - `profiles.ACTIVE_FIELDS` lists the twenty-three fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
     `chunk_exclude_headings`, `chunk_token_budget`, `chunk_strategy`,
     `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
     `chunk_split_sentences`, `chunk_fence_aware`,
-    `chunk_heading_path_mode`).
+    `chunk_heading_path_mode`, `source_kind`, `appeals_db`, `bundling_mode`,
+    `destination`, `embedding_model`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
     `spreadsheet_preview_rows`, `include_pdf_page_headers`,
     `include_source_metadata`, `bundle_separator_style`, `create_zip`).
-  - Five built-in templates available via `get_built_in_profile(name)` and
+  - Ten built-in templates available via `get_built_in_profile(name)` and
     `list_built_in_profiles()`: `ChatGPT Balanced Project`,
     `Claude Full Project`, `Visual Repair Manual`, `RAG Ready Export`,
-    `Lean One-Shot Chat`. Each call returns an independent copy.
+    `Lean One-Shot Chat`, and the destination-aware
+    `Claude Project`, `ChatGPT Project`, `DHS / ChatGPT Enterprise` (medium
+    bundling at a 110K budget), `Self-hosted RAG` (heading-aligned 512-token
+    chunks with heading-path breadcrumbs), and `Local Hybrid RAG`
+    (`target=cowork` with the offline `hashing` embedder for a self-contained
+    BM25 + vector MCP server). Each call returns an independent copy.
   - Forward-compat: unknown JSON keys are dropped on load, a
     `_schema_version` is written, and a corrupt file does not break
     `list_profiles`.
@@ -375,6 +454,20 @@ Already shipped:
   redirects profile storage (mirroring the `profiles_dir` parameter on the
   profile API). An unknown profile name fails with exit code 2 and lists
   the available saved and built-in names.
+- CLI appeals source (`--appeals-db <path>`, a documented additive CLI change
+  under repository rule 2; behavior without the flag is unchanged):
+  `pack_project.py --appeals-db pa_appeals.sqlite3 --target ... --mode ...`
+  packages FEMA appeals from the SQLite database instead of a folder, so
+  `source_dir` is no longer required. It composes with `--profile`
+  (`--profile "DHS / ChatGPT Enterprise" --appeals-db <path>` runs the medium
+  bundling + DHS guidance against the appeals corpus). A missing/non-file DB
+  path fails with exit code 2.
+- CLI embedding model (`--embedding-model <spec>`, additive; default behavior
+  unchanged): for `--target cowork`, embeds chunks for vector/hybrid search.
+  `hashing` (offline default of `Local Hybrid RAG`),
+  `openai:text-embedding-3-small`, or `voyage:voyage-3`. Threads to
+  `run_packaging_job(embedding_model=...)`; API backends send chunk text to the
+  provider, so they are opt-in.
 - JSON file support in `packer/presets.py` and `packer/readers.py`:
   `.json` classifies as file type `json` and `_read_json` renders objects
   as Markdown with one heading per key (top level `##`, nested objects one
@@ -383,10 +476,11 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (36 cases), `test_chunking.py` (60 cases),
-  `test_readers.py` (6 cases), `test_profiles.py` (34 cases),
-  `test_cli.py` (11 cases), and
-  `test_bundler.py` (4 cases) — 151 in total; passes with
+  `test_pipeline.py` (38 cases), `test_chunking.py` (60 cases),
+  `test_readers.py` (6 cases), `test_profiles.py` (37 cases),
+  `test_cli.py` (14 cases), `test_bundler.py` (9 cases),
+  `test_appeals_source.py` (7 cases), `test_embedder.py` (9 cases), and
+  `test_cowork_hybrid.py` (3 cases) — 183 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -476,9 +570,22 @@ early.
   never starts it, registers it, or exposes it to the network.
 - No claims that token presets equal official platform context-window limits.
 - No new heavyweight dependencies without a clear reason; `tiktoken` stays
-  optional.
-- For V2: no OCR, embeddings, vector database, similarity search, automated
-  redaction, or image captioning. These require explicit future milestones.
+  optional. The Phase B embedding backends (`openai`, `voyageai`, and
+  `sentence-transformers` for local bge/e5) are **lazy and optional**: the
+  default embedder is a dependency-free, offline hashing embedder, and a missing
+  package or API key degrades the cowork server to FTS5-only retrieval rather
+  than failing.
+- No OCR, automated redaction, or image captioning yet. These require explicit
+  future milestones.
+- **Embeddings / vector search are now in scope (Phase B / V3 of the appeals
+  repurpose).** The earlier V2 exclusion of "embeddings, vector database,
+  similarity search" has been lifted because self-hosted embedding RAG is the
+  now-primary use case (see the 2026-06 Direction Update). It is implemented
+  locally: a pluggable embedder (`packer/embedder.py`) and a hybrid
+  (BM25 + vector, RRF) retrieval layer inside the **local, stdio-only** cowork
+  MCP server — the sanctioned local exception. Embedding via an API backend
+  sends chunk text to that provider and is therefore strictly opt-in
+  (`--embedding-model openai:…`); the default stays offline.
 
 ## Coding conventions
 
@@ -491,7 +598,7 @@ early.
 - One responsibility per module. Keep `packer/` modules narrow:
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
   `token_estimator`, `manifest`, `bundler`, `chunking`, `exporters`,
-  `pipeline`, `profiles`.
+  `pipeline`, `profiles`, `appeals_source`, `guidance`, `embedder`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
@@ -745,7 +852,8 @@ For `--target cowork`:
       source_map.json
     mcp_server/
       server.py
-      index.sqlite
+      embedder.py        # present so the server can embed queries
+      index.sqlite       # FTS5 chunks + (when embedded) vectors + embedder_meta
       cowork_config.json
       requirements.txt
       README.md
@@ -755,7 +863,10 @@ The cowork target reuses the rag chunking path and adds the `mcp_server/`
 directory next to the standard outputs. The per-bundle token budget under
 this target is interpreted as a per-chunk budget, scaled smaller than the
 rag defaults so each FTS5 hit fits comfortably inside a single MCP tool
-response.
+response. When `embedding_model` resolves to a usable embedder, `index.sqlite`
+also holds a `vectors` table and `embedder_meta`, `embedder.py` is copied in,
+and the server exposes `vector_search` and `hybrid_search` alongside the
+keyword `search`; otherwise the server is FTS5-only.
 
 Rules for output:
 

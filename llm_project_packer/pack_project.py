@@ -125,6 +125,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory to load saved profiles from "
         "(default: ~/.llm_project_packer/profiles).",
     )
+    parser.add_argument(
+        "--appeals-db",
+        type=Path,
+        default=None,
+        help="Package FEMA appeals from a pa_rag SQLite database "
+        "(pa_appeals.sqlite3) instead of scanning a folder. When set, "
+        "source_dir is not required.",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="For --target cowork: embed chunks for vector/hybrid search. "
+        "Use 'hashing' (offline, default for the Local Hybrid RAG profile), "
+        "'openai:text-embedding-3-small', or 'voyage:voyage-3'. API backends "
+        "send chunk text to the provider.",
+    )
     return parser
 
 
@@ -138,7 +154,7 @@ def enforce_required_args(parser: argparse.ArgumentParser, args: argparse.Namesp
     if args.profile:
         return
     missing = []
-    if args.source_dir is None:
+    if args.source_dir is None and args.appeals_db is None:
         missing.append("source_dir")
     if args.target is None:
         missing.append("--target")
@@ -149,22 +165,43 @@ def enforce_required_args(parser: argparse.ArgumentParser, args: argparse.Namesp
 
 
 def build_config_from_args(args: argparse.Namespace) -> PackerConfig:
-    source_dir = args.source_dir.expanduser().resolve()
-    project_name = args.project_name or source_dir.name or "project"
     include_exts = _parse_extensions(args.include_extensions) or presets.DEFAULT_INCLUDE_EXTENSIONS
     extra_exclude = _parse_csv_list(args.exclude_dirs)
     exclude_dirs = tuple(set(presets.DEFAULT_EXCLUDE_DIRS) | set(extra_exclude))
     max_tokens = args.max_bundle_tokens or presets.get_bundle_token_budget(args.target, args.mode)
+    output_dir = (args.output or Path("./llm_project_exports")).expanduser().resolve()
 
+    if args.appeals_db is not None:
+        appeals_db = args.appeals_db.expanduser().resolve()
+        project_name = args.project_name or appeals_db.stem or "appeals"
+        cfg = PackerConfig(
+            source_dir=appeals_db.parent,
+            output_dir=output_dir,
+            target=args.target,
+            mode=args.mode,
+            project_name=project_name,
+            max_bundle_tokens=max_tokens,
+            include_extensions=include_exts,
+            exclude_dirs=exclude_dirs,
+            source_kind="appeals",
+            appeals_db=appeals_db,
+            embedding_model=args.embedding_model or "",
+        )
+        cfg.validate()
+        return cfg
+
+    source_dir = args.source_dir.expanduser().resolve()
+    project_name = args.project_name or source_dir.name or "project"
     cfg = PackerConfig(
         source_dir=source_dir,
-        output_dir=(args.output or Path("./llm_project_exports")).expanduser().resolve(),
+        output_dir=output_dir,
         target=args.target,
         mode=args.mode,
         project_name=project_name,
         max_bundle_tokens=max_tokens,
         include_extensions=include_exts,
         exclude_dirs=exclude_dirs,
+        embedding_model=args.embedding_model or "",
     )
     cfg.validate()
     return cfg
@@ -195,6 +232,7 @@ def build_job_kwargs_from_profile(args: argparse.Namespace) -> Dict[str, Any]:
         source_dir=args.source_dir,
         output_dir=args.output,
         project_name=args.project_name,
+        appeals_db=args.appeals_db,
     )
     if args.target:
         kwargs["target"] = args.target
@@ -202,6 +240,8 @@ def build_job_kwargs_from_profile(args: argparse.Namespace) -> Dict[str, Any]:
         kwargs["mode"] = args.mode
     if args.max_bundle_tokens:
         kwargs["max_bundle_tokens"] = args.max_bundle_tokens
+    if args.embedding_model is not None:
+        kwargs["embedding_model"] = args.embedding_model
     include_exts = _parse_extensions(args.include_extensions)
     if include_exts:
         kwargs["include_extensions"] = include_exts
@@ -209,11 +249,19 @@ def build_job_kwargs_from_profile(args: argparse.Namespace) -> Dict[str, Any]:
     if extra_exclude:
         existing = tuple(kwargs.get("exclude_dirs") or ())
         kwargs["exclude_dirs"] = tuple(set(existing) | set(extra_exclude))
-    source_dir = Path(kwargs["source_dir"]).expanduser().resolve()
-    if not source_dir.exists() or not source_dir.is_dir():
-        raise ValueError(
-            f"Source directory does not exist or is not a directory: {source_dir}"
-        )
+    if kwargs.get("source_kind") == "appeals":
+        appeals_db = Path(kwargs["appeals_db"]).expanduser().resolve()
+        if not appeals_db.exists() or not appeals_db.is_file():
+            raise ValueError(
+                f"Appeals database does not exist or is not a file: {appeals_db}"
+            )
+        kwargs["appeals_db"] = str(appeals_db)
+    else:
+        source_dir = Path(kwargs["source_dir"]).expanduser().resolve()
+        if not source_dir.exists() or not source_dir.is_dir():
+            raise ValueError(
+                f"Source directory does not exist or is not a directory: {source_dir}"
+            )
     return kwargs
 
 
