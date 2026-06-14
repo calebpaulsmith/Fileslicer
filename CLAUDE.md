@@ -671,9 +671,9 @@ Run from the repo root (`C:\Users\caleb\OneDrive\Desktop\Scripts\Fileslicer`):
 
 ```powershell
 # Imports parse and the estimator backend resolves
-.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import bundler, config, exporters, manifest, markdown_utils, pipeline, presets, profiles, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
+.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import appeals_source, bundler, config, context_probe, embedder, exporters, guidance, manifest, markdown_utils, pipeline, presets, profiles, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
 
-# All five built-in profile templates load and validate
+# All ten built-in profile templates load and validate
 .\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer.profiles import list_built_in_profiles, get_built_in_profile; [get_built_in_profile(n).validate() for n in list_built_in_profiles()]; print('built-ins ok:', list_built_in_profiles())"
 
 # Four target / mode combinations against the sample input
@@ -692,6 +692,16 @@ python pack_project.py .\does\not\exist --target chatgpt --mode balanced  # conf
 python pack_project.py .\sample_input --profile "RAG Ready Export" --output .\test_output   # rag/balanced with 800-token chunks from the template
 python pack_project.py .\sample_input --profile "RAG Ready Export" --target generic --mode lean --output .\test_output  # flags override the profile
 python pack_project.py .\sample_input --profile "No Such Profile"  # error listing saved + built-in names, exit code 2
+
+# Appeals source (reads pa_rag's pa_appeals.sqlite3; --appeals-db bare uses presets.DEFAULT_APPEALS_DB)
+python pack_project.py --profile "DHS / ChatGPT Enterprise" --appeals-db --output .\test_output   # medium bundling + 00_CORPUS_OVERVIEW + DHS guidance; appeals carry URL + PDF
+python pack_project.py --profile "Self-hosted RAG" --appeals-db --output .\test_output            # rag chunks.jsonl with appeal metadata + heading breadcrumbs
+python pack_project.py --profile "Local Hybrid RAG" --appeals-db --output .\test_output           # cowork MCP server, offline hashing vectors
+python pack_project.py --profile "Local Hybrid RAG" --appeals-db --embedding-model local:bge-small-en-v1.5 --output .\test_output  # on-machine bge/e5 vectors (needs sentence-transformers)
+python pack_project.py --appeals-db .\nope.sqlite3 --target rag --mode balanced  # missing DB, exit code 2
+
+# Context probe (manual retrieval-window measurement; writes canary bundles + answer key, then exits)
+python pack_project.py --context-probe 8 --output .\test_output
 ```
 
 UI smoke checks for the scan/review screens:
