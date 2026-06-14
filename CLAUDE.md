@@ -351,6 +351,16 @@ Already shipped:
     table is a fatal `ValueError`. The pipeline branches on
     `PackerConfig.source_kind` (`folder` default / `appeals`); everything from
     bundling onward is the shared path. The DB is opened read-only.
+  - **Appeals workspace in `streamlit_app.py`** (`_render_appeals_export` and
+    helpers): the UI exposes every CLI lever for the appeals source — token
+    budget, bundling mode, destination, embedder, and the full chunk-setting set
+    (incl. `chunk_exclude_headings`) — plus a live packing/chunking visualizer.
+    It is backed by three preview functions in `pipeline`:
+    `load_appeal_documents(db)` renders the appeals once (cached in session
+    state), and `summarize_appeal_bundles(...)` / `summarize_appeal_chunks(...)`
+    reuse the real bundler/chunker to compute the bundle plan or chunk-size
+    distribution without writing files, so the preview matches a run (rule 3 —
+    no duplicated packing logic in the UI).
   - `packer/guidance.py` (`guidance_for_destination(destination)`) holds a
     per-destination lever cheat-sheet (effective/inert/harmful) distilled from
     the repo-root research docs, for the four destinations
@@ -479,8 +489,8 @@ Already shipped:
   `test_pipeline.py` (38 cases), `test_chunking.py` (60 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (37 cases),
   `test_cli.py` (14 cases), `test_bundler.py` (9 cases),
-  `test_appeals_source.py` (7 cases), `test_embedder.py` (9 cases), and
-  `test_cowork_hybrid.py` (3 cases) — 183 in total; passes with
+  `test_appeals_source.py` (10 cases), `test_embedder.py` (9 cases), and
+  `test_cowork_hybrid.py` (3 cases) — 186 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
