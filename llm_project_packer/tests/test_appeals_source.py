@@ -58,7 +58,11 @@ def _build_db(path: Path, appeals, citations=None, *, with_citation_tables=True)
     conn = sqlite3.connect(path)
     cols_ddl = ", ".join(f"{c} {'INTEGER' if c.endswith('_id') else 'TEXT'}" for c in _FINAL_COLUMNS)
     conn.execute(f"CREATE TABLE final_appeal_authority ({cols_ddl})")
-    conn.execute("CREATE TABLE src_html_appeal (html_id INTEGER, html_doc_key TEXT)")
+    conn.execute(
+        "CREATE TABLE src_html_appeal (html_id INTEGER, html_doc_key TEXT, source_url TEXT)"
+    )
+    conn.execute("CREATE TABLE link_html_filename (html_id INTEGER, filename_id INTEGER)")
+    conn.execute("CREATE TABLE src_filename_pdf (filename_id INTEGER, name TEXT)")
     if with_citation_tables:
         conn.execute(
             "CREATE TABLE document_citation (parent_doc_key TEXT, citation_id TEXT)"
@@ -77,8 +81,18 @@ def _build_db(path: Path, appeals, citations=None, *, with_citation_tables=True)
         key = appeal.get("html_doc_key")
         if key:
             conn.execute(
-                "INSERT INTO src_html_appeal (html_id, html_doc_key) VALUES (?, ?)",
-                (appeal.get("html_id"), key),
+                "INSERT INTO src_html_appeal (html_id, html_doc_key, source_url) VALUES (?, ?, ?)",
+                (appeal.get("html_id"), key, appeal.get("source_url")),
+            )
+        if appeal.get("pdf_name"):
+            fid = appeal.get("html_id") or appeal.get("final_id")
+            conn.execute(
+                "INSERT INTO src_filename_pdf (filename_id, name) VALUES (?, ?)",
+                (fid, appeal["pdf_name"]),
+            )
+            conn.execute(
+                "INSERT INTO link_html_filename (html_id, filename_id) VALUES (?, ?)",
+                (appeal.get("html_id"), fid),
             )
     if with_citation_tables and citations:
         cid = 0
@@ -182,10 +196,10 @@ class AppealsSourceTests(unittest.TestCase):
     def test_bad_row_is_isolated(self) -> None:
         original = appeals_source._render_appeal_markdown
 
-        def flaky(row, citations):
+        def flaky(row, citations, *args):
             if row["final_id"] == 1:
                 raise ValueError("boom")
-            return original(row, citations)
+            return original(row, citations, *args)
 
         appeals_source._render_appeal_markdown = flaky
         try:

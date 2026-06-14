@@ -55,6 +55,30 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return row is not None
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(r["name"] == column for r in conn.execute(f"PRAGMA table_info({table})"))
+
+
+def _load_pdf_by_html_id(conn: sqlite3.Connection) -> Dict[int, str]:
+    """Map each appeal's ``html_id`` to its linked source PDF filename, if any.
+
+    Uses ``link_html_filename`` → ``src_filename_pdf``; returns an empty map if
+    either table is absent. One filename per appeal (first by name).
+    """
+    if not (_table_exists(conn, "link_html_filename") and _table_exists(conn, "src_filename_pdf")):
+        return {}
+    rows = conn.execute(
+        """
+        SELECT l.html_id AS html_id, MIN(p.name) AS name
+        FROM link_html_filename l
+        JOIN src_filename_pdf p ON p.filename_id = l.filename_id
+        WHERE p.name IS NOT NULL AND TRIM(p.name) <> ''
+        GROUP BY l.html_id
+        """
+    ).fetchall()
+    return {row["html_id"]: row["name"] for row in rows}
+
+
 def _load_citations_by_appeal(conn: sqlite3.Connection) -> Dict[str, List[str]]:
     """Map each appeal's ``html_doc_key`` to its distinct cited authorities.
 
@@ -90,6 +114,8 @@ def _clean(value: Any) -> str:
 def _render_appeal_markdown(
     row: sqlite3.Row,
     citations: List[str],
+    source_url: str = "",
+    pdf_name: str = "",
 ) -> Tuple[str, str]:
     """Return ``(title, body_markdown)`` for one appeal row."""
     title = _clean(row["final_title"]) or _clean(row["final_appellant"]) or _clean(
@@ -100,6 +126,8 @@ def _render_appeal_markdown(
         ("Appellant", _clean(row["final_appellant"])),
         ("Recipient", _clean(row["final_recipient"])),
         ("PA ID", _clean(row["final_pa_id"])),
+        ("URL", source_url),
+        ("Source PDF", pdf_name),
         (
             "Disaster",
             " ".join(
@@ -157,7 +185,13 @@ def _render_appeal_markdown(
     return title, normalize_newlines("\n".join(lines))
 
 
-def _appeal_metadata(row: sqlite3.Row, title: str, citations: List[str]) -> Dict[str, Any]:
+def _appeal_metadata(
+    row: sqlite3.Row,
+    title: str,
+    citations: List[str],
+    source_url: str = "",
+    pdf_name: str = "",
+) -> Dict[str, Any]:
     """Structured per-appeal metadata attached to each RAG chunk for filtering/citation."""
     fields = {
         "title": title,
@@ -169,6 +203,8 @@ def _appeal_metadata(row: sqlite3.Row, title: str, citations: List[str]) -> Dict
         "decision_date": _clean(row["final_decision_signed_date"]),
         "region": _clean(row["final_region"]),
         "status": _clean(row["final_status"]),
+        "url": source_url,
+        "pdf_filename": pdf_name,
         "final_id": row["final_id"],
         "source_key": _clean(row["html_doc_key"]),
     }
@@ -211,8 +247,10 @@ def load_appeal_docs(
             else ""
         )
         html_key = "h.html_doc_key AS html_doc_key" if has_html else "NULL AS html_doc_key"
+        has_url = has_html and _column_exists(conn, "src_html_appeal", "source_url")
+        url_col = "h.source_url AS source_url" if has_url else "NULL AS source_url"
         query = (
-            f"SELECT f.final_id, f.html_id, {html_key}, "
+            f"SELECT f.final_id, f.html_id, {html_key}, {url_col}, "
             "f.final_title, f.final_appellant, f.final_recipient, f.final_pa_id, "
             "f.final_disaster_number_raw, f.final_disaster_number_norm, "
             "f.final_decision_signed_date, f.final_declaration_date, "
@@ -227,6 +265,7 @@ def load_appeal_docs(
             query += f" LIMIT {int(limit)}"
 
         citations_by_key = _load_citations_by_appeal(conn)
+        pdf_by_html = _load_pdf_by_html_id(conn)
         rows = conn.execute(query).fetchall()
     finally:
         conn.close()
@@ -237,8 +276,10 @@ def load_appeal_docs(
         final_id = row["final_id"]
         try:
             citations = citations_by_key.get(_clean(row["html_doc_key"]), [])
-            title, body = _render_appeal_markdown(row, citations)
-            metadata = _appeal_metadata(row, title, citations)
+            source_url = _clean(row["source_url"])
+            pdf_name = pdf_by_html.get(row["html_id"], "")
+            title, body = _render_appeal_markdown(row, citations, source_url, pdf_name)
+            metadata = _appeal_metadata(row, title, citations, source_url, pdf_name)
             source_file = safe_filename(f"appeal_{final_id}_{title}", max_length=100) + ".md"
             entry = ManifestEntry(
                 doc_id=doc_id,

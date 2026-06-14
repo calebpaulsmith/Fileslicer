@@ -360,7 +360,29 @@ Already shipped:
     state), and `summarize_appeal_bundles(...)` / `summarize_appeal_chunks(...)`
     reuse the real bundler/chunker to compute the bundle plan or chunk-size
     distribution without writing files, so the preview matches a run (rule 3 —
-    no duplicated packing logic in the UI).
+    no duplicated packing logic in the UI). The summaries also report
+    `total_bytes`/per-bundle `bytes` so the UI shows export size in MB; the
+    export result shows the real on-disk folder size.
+  - Appeals rendering now also emits each appeal's **source URL**
+    (`src_html_appeal.source_url`) and **linked source PDF filename**
+    (`link_html_filename` → `src_filename_pdf.name`) in the overview block and
+    the chunk `metadata` (`url`, `pdf_filename`). The query guards on column /
+    table presence (`_column_exists`) so a DB without those stays supported.
+  - Default appeals DB path: `presets.DEFAULT_APPEALS_DB`
+    (`C:\Users\caleb\Documents\GitHub\pa_rag\data\pa_appeals.sqlite3`). The CLI
+    `--appeals-db` takes an optional value (bare flag = the default), and the UI
+    pre-fills the path.
+  - `packer/context_probe.py` (`build_context_probe(output_dir, bundle_tokens,
+    bundles)`): generates a local needle-in-a-haystack probe — N canary bundles
+    + an in-file depth file (canaries at 10–150% of the budget) + an answer key
+    + instructions — to *manually* measure a destination's effective retrieval
+    window (e.g. confirm the ~110K ChatGPT-Enterprise stuffing budget for a
+    specific workspace). FileSlicer cannot query a hosted platform, so it only
+    writes the artifacts; the user uploads and asks the answer-key questions.
+    CLI: `--context-probe [N]` (short-circuits the run); UI: a button in the
+    appeals workspace. The 110,000 default traces to the OpenAI Enterprise
+    file-upload doc ("up to 110K tokens from uploaded documents in the context
+    window"), per the repo-root research.
   - `packer/guidance.py` (`guidance_for_destination(destination)`) holds a
     per-destination lever cheat-sheet (effective/inert/harmful) distilled from
     the repo-root research docs, for the four destinations
@@ -489,8 +511,9 @@ Already shipped:
   `test_pipeline.py` (38 cases), `test_chunking.py` (60 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (37 cases),
   `test_cli.py` (14 cases), `test_bundler.py` (9 cases),
-  `test_appeals_source.py` (10 cases), `test_embedder.py` (9 cases), and
-  `test_cowork_hybrid.py` (3 cases) — 186 in total; passes with
+  `test_appeals_source.py` (10 cases), `test_embedder.py` (9 cases),
+  `test_cowork_hybrid.py` (3 cases), `test_appeals_quality.py` (7 cases), and
+  `test_context_probe.py` (4 cases) — 199 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -608,7 +631,8 @@ early.
 - One responsibility per module. Keep `packer/` modules narrow:
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
   `token_estimator`, `manifest`, `bundler`, `chunking`, `exporters`,
-  `pipeline`, `profiles`, `appeals_source`, `guidance`, `embedder`.
+  `pipeline`, `profiles`, `appeals_source`, `guidance`, `embedder`,
+  `context_probe`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
