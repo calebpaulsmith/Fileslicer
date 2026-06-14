@@ -54,8 +54,11 @@ from packer.pipeline import (  # noqa: E402
     ProgressEvent,
     chunking_guidance,
     corpus_heading_summary,
+    load_appeal_documents,
     preview_document_chunks,
     run_packaging_job,
+    summarize_appeal_bundles,
+    summarize_appeal_chunks,
 )
 from packer.profiles import (  # noqa: E402
     Profile,
@@ -2357,7 +2360,9 @@ def _render_status() -> None:
     st.info(
         "The UI creates local export folders through the same backend used by "
         "the CLI. Uploads remain manual; this app does not automate LLM logins, "
-        "browser actions, OCR, embeddings, or remote storage."
+        "browser actions, OCR, or remote storage. Embeddings for the cowork "
+        "target run locally by default (offline hashing, or local bge/e5); an "
+        "API embedder is used only if you explicitly choose one."
     )
 
 
@@ -2366,77 +2371,285 @@ def _render_status() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _render_appeals_export(profile: Profile) -> None:
-    """Package FEMA appeals straight from a pa_rag SQLite database.
+SESSION_KEY_APPEALS_DOCS = "appeals_docs_cache"
+_BUNDLE_TARGETS = ("chatgpt", "claude", "generic")
 
-    The appeals source bypasses the folder scan/review flow (those screens are
-    folder-specific), so this is a self-contained panel: point it at a
-    ``pa_appeals.sqlite3`` and it runs the same backend as the CLI's
-    ``--appeals-db`` with the current profile's target/mode/chunking/destination
-    settings.
-    """
-    with st.expander("Package FEMA appeals from a pa_rag database", expanded=False):
-        st.caption(
-            "Reads finalized appeals from `final_appeal_authority` and renders one "
-            "Markdown document per appeal, then bundles/chunks them with the current "
-            "Target, Mode, Bundling mode, Destination, and chunk settings above. "
-            "This path does not use the folder scan/review screens."
-        )
-        profile.appeals_db = st.text_input(
-            "Appeals SQLite database path",
-            value=profile.appeals_db,
-            help="Path to pa_appeals.sqlite3.",
-            key=_key("appeals_db"),
-        )
-        db_text = profile.appeals_db.strip()
-        if st.button("Package appeals", type="primary", disabled=not db_text):
-            db_path = Path(db_text).expanduser()
-            if not db_path.is_file():
-                st.error(f"Appeals database does not exist or is not a file: {db_path}")
-                return
-            output_dir = _resolved_output_path(profile)
-            project_name = profile.project_name.strip() or db_path.stem or "appeals"
-            max_bundle_tokens = _resolved_max_bundle_tokens(profile)
-            messages: List[str] = []
-            log_placeholder = st.empty()
 
-            def on_progress(event: ProgressEvent) -> None:
-                if event.message:
-                    messages.append(event.message)
-                    log_placeholder.code("\n".join(messages[-12:]), language="text")
-
-            try:
-                result = run_packaging_job(
-                    appeals_db=db_path,
-                    source_kind="appeals",
-                    output_dir=output_dir,
-                    project_name=project_name,
-                    target=profile.target,
-                    mode=profile.mode,
-                    max_bundle_tokens=max_bundle_tokens,
-                    chunk_token_budget=profile.chunk_token_budget,
-                    chunk_strategy=profile.chunk_strategy,
-                    chunk_heading_level=int(profile.chunk_heading_level),
-                    chunk_min_tokens=int(profile.chunk_min_tokens),
-                    chunk_overlap_tokens=int(profile.chunk_overlap_tokens),
-                    chunk_split_sentences=bool(profile.chunk_split_sentences),
-                    chunk_fence_aware=bool(profile.chunk_fence_aware),
-                    chunk_heading_path_mode=profile.chunk_heading_path_mode,
-                    bundling_mode=profile.bundling_mode,
-                    destination=profile.destination,
-                    embedding_model=profile.embedding_model,
-                    progress_callback=on_progress,
-                )
-            except Exception as exc:  # noqa: BLE001 - surface failures in the UI
-                st.error(f"Appeals export failed: {exc}")
-                return
-
-            st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = result
-            st.success(
-                f"Packaged {result.processed_count} appeal documents "
-                f"({result.failed_count} failed) into {result.export_dir.name}."
+def _render_appeals_levers(profile: Profile) -> None:
+    """Editable packaging levers for the appeals workspace (bound to the profile)."""
+    default_budget = presets.get_bundle_token_budget(profile.target, profile.mode)
+    use_override = st.checkbox(
+        "Override token budget",
+        value=profile.max_bundle_tokens is not None,
+        help=f"Default for {profile.target} / {profile.mode}: {default_budget:,}. "
+        "This is the lever that sets how many bundles you get.",
+        key=_key("appeals_use_budget"),
+    )
+    if use_override:
+        profile.max_bundle_tokens = int(
+            st.number_input(
+                "Max bundle tokens",
+                min_value=1,
+                value=int(profile.max_bundle_tokens or default_budget),
+                step=1000,
+                key=_key("appeals_budget"),
             )
-            _render_export_result(profile.target, result)
+        )
+    else:
+        profile.max_bundle_tokens = None
+
+    if profile.target in ("rag", "cowork"):
+        st.markdown("**Chunk settings** (RAG / cowork)")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            strategy_options = [STRATEGY_TOKENS, STRATEGY_HEADINGS]
+            profile.chunk_strategy = st.selectbox(
+                "Chunk strategy",
+                options=strategy_options,
+                index=_safe_index(strategy_options, profile.chunk_strategy),
+                key=_key("appeals_chunk_strategy"),
+            )
+            profile.chunk_token_budget = int(
+                st.number_input(
+                    "Chunk size (tokens)",
+                    min_value=1,
+                    value=int(profile.chunk_token_budget or 512),
+                    step=64,
+                    key=_key("appeals_chunk_budget"),
+                )
+            )
+        with col_b:
+            profile.chunk_heading_level = int(
+                st.number_input(
+                    "Split at heading level",
+                    min_value=1,
+                    max_value=6,
+                    value=int(profile.chunk_heading_level),
+                    key=_key("appeals_heading_level"),
+                )
+            )
+            profile.chunk_min_tokens = int(
+                st.number_input(
+                    "Min chunk size (0 = off)",
+                    min_value=0,
+                    value=int(profile.chunk_min_tokens),
+                    step=16,
+                    key=_key("appeals_min_tokens"),
+                )
+            )
+            profile.chunk_overlap_tokens = int(
+                st.number_input(
+                    "Chunk overlap (0 = off)",
+                    min_value=0,
+                    value=int(profile.chunk_overlap_tokens),
+                    step=16,
+                    key=_key("appeals_overlap"),
+                )
+            )
+        with col_c:
+            profile.chunk_heading_path_mode = st.selectbox(
+                "Heading breadcrumb",
+                options=list(HEADING_PATH_MODES),
+                index=_safe_index(list(HEADING_PATH_MODES), profile.chunk_heading_path_mode),
+                key=_key("appeals_heading_path"),
+            )
+            profile.chunk_split_sentences = st.checkbox(
+                "Split oversize lines at sentences",
+                value=bool(profile.chunk_split_sentences),
+                key=_key("appeals_split_sentences"),
+            )
+            profile.chunk_fence_aware = st.checkbox(
+                "Keep code blocks whole",
+                value=bool(profile.chunk_fence_aware),
+                key=_key("appeals_fence_aware"),
+            )
+        rules_csv = st.text_input(
+            "Corpus chunk rules (drop chunks whose first heading matches, comma-separated globs)",
+            value=_list_to_csv(profile.chunk_exclude_headings),
+            help="Example: Appeal Overview, Footnotes, *_html",
+            key=_key("appeals_chunk_rules"),
+        )
+        profile.chunk_exclude_headings = _csv_to_list(rules_csv)
+
+
+def _render_appeals_visualizer(profile: Profile, docs: Sequence) -> None:
+    """Live preview of how the current levers pack/chunk the loaded appeals."""
+    import pandas as pd
+
+    budget = _resolved_max_bundle_tokens(profile)
+    st.markdown("#### Packaging preview")
+    if profile.target in _BUNDLE_TARGETS:
+        summary = summarize_appeal_bundles(
+            docs, budget, profile.bundling_mode, int(profile.chunk_heading_level)
+        )
+        cols = st.columns(4)
+        cols[0].metric("Appeals", f"{summary['doc_count']:,}")
+        cols[1].metric("Total tokens", f"{summary['total_tokens']:,}")
+        cols[2].metric("Bundles", summary["bundle_count"])
+        avg = summary["total_tokens"] // max(1, summary["bundle_count"])
+        cols[3].metric("Avg tokens / bundle", f"{avg:,}")
+        st.caption(
+            f"{summary['total_tokens']:,} total tokens ÷ {budget:,} budget "
+            f"≈ **{summary['bundle_count']} bundles** "
+            f"({profile.bundling_mode} packing). Lower the budget for more, smaller "
+            "files; raise it for fewer, larger ones."
+        )
+        per = summary["per_bundle"]
+        if per:
+            chart = pd.DataFrame(
+                {"tokens": [b["tokens"] for b in per], "appeals": [b["doc_count"] for b in per]},
+                index=[b["name"] for b in per],
+            )
+            st.bar_chart(chart["tokens"], height=240)
+            with st.expander("Per-bundle detail", expanded=False):
+                st.dataframe(chart, use_container_width=True)
+    else:
+        chunk_budget = int(profile.chunk_token_budget or budget)
+        summary = summarize_appeal_chunks(
+            docs,
+            chunk_budget,
+            profile.chunk_strategy,
+            int(profile.chunk_heading_level),
+            int(profile.chunk_min_tokens),
+            bool(profile.chunk_split_sentences),
+            bool(profile.chunk_fence_aware),
+        )
+        cols = st.columns(4)
+        cols[0].metric("Appeals", f"{summary['doc_count']:,}")
+        cols[1].metric("Chunks", f"{summary['chunk_count']:,}")
+        cols[2].metric("Median chunk", f"{summary['median']:,}")
+        cols[3].metric("Over budget", summary["over_budget"])
+        st.caption(
+            f"{summary['chunk_count']:,} chunks at ~{chunk_budget:,} tokens "
+            f"({CHUNK_STRATEGY_LABELS.get(profile.chunk_strategy, profile.chunk_strategy)}). "
+            f"Smallest {summary['smallest']:,} / median {summary['median']:,} / "
+            f"largest {summary['largest']:,} tokens."
+        )
+        if summary["over_budget"]:
+            st.warning(
+                f"{summary['over_budget']} chunks exceed the budget (unbreakable long "
+                "lines). Try sentence splitting or a larger chunk size."
+            )
+        labels = ["0-25%", "25-50%", "50-75%", "75-100%", "> budget"]
+        counts = [0, 0, 0, 0, 0]
+        for size in summary["sizes"]:
+            frac = size / chunk_budget if chunk_budget else 0
+            counts[min(int(frac * 4), 3) if frac <= 1 else 4] += 1
+        st.bar_chart(
+            pd.DataFrame({"chunks": counts}, index=labels), height=240
+        )
+
+
+def _render_appeals_sample(docs: Sequence) -> None:
+    with st.expander("Preview a rendered appeal (fidelity check)", expanded=False):
+        names = [getattr(d.entry, "source_file", f"doc_{i}") for i, d in enumerate(docs)]
+        pick = st.selectbox(
+            "Appeal",
+            options=list(range(len(docs))),
+            format_func=lambda i: names[i],
+            key=_key("appeals_sample"),
+        )
+        st.code(docs[pick].total_markdown, language="markdown")
+
+
+def _run_appeals_export(profile: Profile, db_path: Path) -> None:
+    output_dir = _resolved_output_path(profile)
+    project_name = profile.project_name.strip() or db_path.stem or "appeals"
+    messages: List[str] = []
+    log_placeholder = st.empty()
+
+    def on_progress(event: ProgressEvent) -> None:
+        if event.message:
+            messages.append(event.message)
+            log_placeholder.code("\n".join(messages[-12:]), language="text")
+
+    try:
+        result = run_packaging_job(
+            appeals_db=db_path,
+            source_kind="appeals",
+            output_dir=output_dir,
+            project_name=project_name,
+            target=profile.target,
+            mode=profile.mode,
+            max_bundle_tokens=profile.max_bundle_tokens,
+            chunk_token_budget=profile.chunk_token_budget,
+            chunk_strategy=profile.chunk_strategy,
+            chunk_heading_level=int(profile.chunk_heading_level),
+            chunk_min_tokens=int(profile.chunk_min_tokens),
+            chunk_overlap_tokens=int(profile.chunk_overlap_tokens),
+            chunk_split_sentences=bool(profile.chunk_split_sentences),
+            chunk_fence_aware=bool(profile.chunk_fence_aware),
+            chunk_heading_path_mode=profile.chunk_heading_path_mode,
+            chunk_exclude_headings=list(profile.chunk_exclude_headings) or None,
+            bundling_mode=profile.bundling_mode,
+            destination=profile.destination,
+            embedding_model=profile.embedding_model,
+            progress_callback=on_progress,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface failures in the UI
+        st.error(f"Appeals export failed: {exc}")
+        return
+
+    st.session_state[SESSION_KEY_LAST_EXPORT_RESULT] = result
+    st.success(
+        f"Packaged {result.processed_count} appeal documents "
+        f"({result.failed_count} failed) into {result.export_dir.name}."
+    )
+    _render_export_result(profile.target, result)
+
+
+def _render_appeals_export(profile: Profile) -> None:
+    """Full appeals workspace: load → edit every lever → visualize → export.
+
+    Packages FEMA appeals straight from a pa_rag SQLite database, using the same
+    backend as the CLI's ``--appeals-db``. The folder scan/review screens are
+    folder-specific, so this workspace exposes every packaging lever and a live
+    packing/chunking visualizer of its own.
+    """
+    st.header("FEMA appeals workspace")
+    st.caption(
+        "Reads finalized appeals from `final_appeal_authority` and renders one "
+        "Markdown document per appeal. Set Target / Mode / Bundling / Destination "
+        "in **Packaging target** above; set the token budget and chunk settings here."
+    )
+    profile.appeals_db = st.text_input(
+        "Appeals SQLite database path",
+        value=profile.appeals_db,
+        help="Path to pa_appeals.sqlite3.",
+        key=_key("appeals_db"),
+    )
+    db_text = profile.appeals_db.strip()
+    cache: Dict[str, list] = st.session_state.setdefault(SESSION_KEY_APPEALS_DOCS, {})
+
+    if st.button("Load appeals", disabled=not db_text, key=_key("load_appeals")):
+        db_path = Path(db_text).expanduser()
+        if not db_path.is_file():
+            st.error(f"Appeals database does not exist or is not a file: {db_path}")
+        else:
+            try:
+                with st.spinner("Loading and rendering appeals..."):
+                    cache[db_text] = load_appeal_documents(db_path)
+                st.success(f"Loaded {len(cache[db_text]):,} appeals.")
+            except Exception as exc:  # noqa: BLE001 - surface load failures
+                st.error(f"Failed to load appeals: {exc}")
+
+    docs = cache.get(db_text)
+    if not docs:
+        st.info("Load the appeals database to edit levers, preview the plan, and export.")
+        return
+
+    st.markdown(
+        f"**Active:** target `{profile.target}` · mode `{profile.mode}` · "
+        f"bundling `{profile.bundling_mode}` · destination `{profile.destination or '—'}`"
+        + (f" · embedder `{profile.embedding_model or 'hashing'}`" if profile.target == "cowork" else "")
+    )
+    _render_appeals_levers(profile)
+    _render_appeals_visualizer(profile, docs)
+    _render_appeals_sample(docs)
+
+    st.divider()
+    if st.button("Package appeals", type="primary", key=_key("package_appeals")):
+        _run_appeals_export(profile, Path(db_text).expanduser())
 
 
 def main() -> None:
