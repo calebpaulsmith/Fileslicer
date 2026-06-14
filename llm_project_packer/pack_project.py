@@ -128,10 +128,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--appeals-db",
         type=Path,
+        nargs="?",
+        const=Path(presets.DEFAULT_APPEALS_DB),
         default=None,
         help="Package FEMA appeals from a pa_rag SQLite database "
-        "(pa_appeals.sqlite3) instead of scanning a folder. When set, "
-        "source_dir is not required.",
+        "(pa_appeals.sqlite3) instead of scanning a folder. Pass a path, or "
+        "give the flag with no value to use the default "
+        f"({presets.DEFAULT_APPEALS_DB}). When set, source_dir is not required.",
+    )
+    parser.add_argument(
+        "--context-probe",
+        type=int,
+        nargs="?",
+        const=8,
+        default=None,
+        metavar="N",
+        help="Generate a context-probe export (N canary bundles, default 8) to "
+        "manually measure a destination's effective retrieval window, then exit. "
+        "Uses --max-bundle-tokens (default 110000) for bundle size and --output "
+        "for the folder. Ignores source/target/mode.",
     )
     parser.add_argument(
         "--embedding-model",
@@ -299,6 +314,17 @@ def main(argv=None) -> int:
         )
         return 2
     args = parser.parse_args(argv)
+    if args.context_probe is not None:
+        from packer.context_probe import build_context_probe
+
+        output_dir = (args.output or Path("./llm_project_exports")).expanduser().resolve()
+        folder = build_context_probe(
+            output_dir,
+            bundle_tokens=args.max_bundle_tokens or 110_000,
+            bundles=max(1, int(args.context_probe)),
+        )
+        print(f"Context probe written to: {folder}")
+        return 0
     enforce_required_args(parser, args)
     try:
         if args.profile:

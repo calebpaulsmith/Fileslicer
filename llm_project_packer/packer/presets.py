@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from typing import Dict
 
+# Default location of the pa_rag FEMA appeals database, used as a convenience
+# fallback by the CLI (`--appeals-db` with no value) and the UI (pre-filled
+# path). Override by passing an explicit path.
+DEFAULT_APPEALS_DB = r"C:\Users\caleb\Documents\GitHub\pa_rag\data\pa_appeals.sqlite3"
+
 # Targets supported by the tool.
 TARGETS = ("chatgpt", "claude", "generic", "rag", "cowork")
 

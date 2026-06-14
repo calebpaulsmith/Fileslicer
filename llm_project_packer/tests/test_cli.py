@@ -285,6 +285,25 @@ class CliTestCase(unittest.TestCase):
         instr = (export_dir / "00_CHATGPT_PROJECT_INSTRUCTIONS.md").read_text(encoding="utf-8")
         self.assertIn("Packaging guidance for this destination", instr)
 
+    def test_context_probe_generates_and_exits(self) -> None:
+        code, out, _ = self._run_main(
+            ["--context-probe", "3", "--output", str(self.output_dir), "--max-bundle-tokens", "1500"]
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("Context probe written", out)
+        probe_dirs = [p for p in self.output_dir.iterdir() if p.is_dir() and "probe" in p.name]
+        self.assertEqual(len(probe_dirs), 1)
+        names = {p.name for p in probe_dirs[0].iterdir()}
+        self.assertIn("PROBE_ANSWER_KEY.md", names)
+        self.assertIn("00_PROBE_INSTRUCTIONS.md", names)
+
+    def test_appeals_db_bare_flag_uses_default(self) -> None:
+        from packer import presets
+
+        parser = cli.build_parser()
+        args = parser.parse_args(["--appeals-db", "--target", "rag", "--mode", "balanced"])
+        self.assertEqual(str(args.appeals_db), presets.DEFAULT_APPEALS_DB)
+
     def test_missing_appeals_db_exits_2(self) -> None:
         code, _, stderr = self._run_main(
             [
