@@ -245,6 +245,28 @@ Embedder specs: `hashing` (offline, lexical placeholder), `openai:<model>`,
 `local:e5-base-v2`). Local models run inference on your machine after a one-time
 download and never send text to a provider.
 
+Each rendered appeal includes its FEMA **source URL** and, when linked, the
+**source PDF filename** (in the overview block and the RAG chunk `metadata`).
+`--appeals-db` accepts a path, or the bare flag uses the default DB
+(`presets.DEFAULT_APPEALS_DB`).
+
+### Measuring a destination's real context window
+
+The DHS / ChatGPT Enterprise medium-bundling budget defaults to **110,000
+tokens** — that figure comes from OpenAI's Enterprise file-upload documentation
+("up to 110K tokens from uploaded documents in the context window"). To confirm
+it for *your* workspace, generate a context probe and run it manually:
+
+```powershell
+python .\pack_project.py --context-probe 8 --output .\test_output
+```
+
+This writes canary bundles + an in-file depth file + an answer key. Upload the
+bundles (not the answer key) to a fresh project, ask each answer-key question,
+and see which unique canaries are retrieved — the pattern reveals the effective
+retrieval breadth and the in-file stuffing cutoff. (Also available as a button
+in the Streamlit appeals workspace.)
+
 The generated `mcp_server/` runs locally over stdio; you register it with your
 MCP client by hand (see its `README.md`). API embedders need the matching
 `OPENAI_API_KEY` / `VOYAGE_API_KEY` and provider package at both export and

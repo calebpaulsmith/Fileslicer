@@ -498,12 +498,18 @@ def summarize_appeal_bundles(
     else:
         bundles = split_into_bundles(docs, max_bundle_tokens)
     per_bundle = [
-        {"name": b.name, "tokens": b.total_tokens, "doc_count": len(b.docs)}
+        {
+            "name": b.name,
+            "tokens": b.total_tokens,
+            "doc_count": len(b.docs),
+            "bytes": sum(len(d.total_markdown.encode("utf-8")) for d in b.docs),
+        }
         for b in bundles
     ]
     return {
         "doc_count": len(docs),
         "total_tokens": sum(d.token_estimate for d in docs),
+        "total_bytes": sum(p["bytes"] for p in per_bundle),
         "bundle_count": len(bundles),
         "per_bundle": per_bundle,
         "over_budget": sum(1 for b in bundles if b.total_tokens > max_bundle_tokens),
@@ -521,6 +527,7 @@ def summarize_appeal_chunks(
 ) -> Dict[str, Any]:
     """Compute chunk statistics for appeal docs without writing files (UI preview)."""
     sizes: List[int] = []
+    total_bytes = 0
     for doc in docs:
         chunks = chunk_document(
             doc.body_markdown,
@@ -532,12 +539,14 @@ def summarize_appeal_chunks(
             fence_aware,
         )
         sizes.extend(c.token_estimate for c in chunks)
+        total_bytes += sum(len(c.text.encode("utf-8")) for c in chunks)
     ordered = sorted(sizes)
     n = len(ordered)
     return {
         "doc_count": len(docs),
         "chunk_count": n,
         "total_tokens": sum(ordered),
+        "total_bytes": total_bytes,
         "smallest": ordered[0] if n else 0,
         "median": ordered[n // 2] if n else 0,
         "largest": ordered[-1] if n else 0,

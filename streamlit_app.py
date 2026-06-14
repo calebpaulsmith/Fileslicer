@@ -30,6 +30,7 @@ import streamlit as st  # noqa: E402
 
 from packer import presets  # noqa: E402
 from packer.config import BUNDLING_MODES  # noqa: E402
+from packer.context_probe import build_context_probe  # noqa: E402
 from packer.chunking import (  # noqa: E402
     DEFAULT_HEADING_LEVEL,
     HEADING_PATH_BOTH,
@@ -2310,13 +2311,26 @@ def _run_export(
         st.success("Export complete.")
 
 
+def _folder_size_bytes(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
 def _render_export_result(target: str, result: PackResult) -> None:
     st.subheader("Export result")
-    summary_cols = st.columns(4)
+    summary_cols = st.columns(5)
     summary_cols[0].metric("Recorded files", result.processed_count)
     summary_cols[1].metric("Failed", result.failed_count)
     summary_cols[2].metric("Skipped", result.skipped_count)
     summary_cols[3].metric("Estimated tokens", f"{result.total_token_estimate:,}")
+    size_mb = _folder_size_bytes(result.export_dir) / 1_000_000
+    summary_cols[4].metric("Export size", f"{size_mb:.1f} MB")
 
     st.markdown("**Export folder**")
     st.code(str(result.export_dir), language="text")
@@ -2494,6 +2508,15 @@ def _render_appeals_visualizer(profile: Profile, docs: Sequence) -> None:
             f"({profile.bundling_mode} packing). Lower the budget for more, smaller "
             "files; raise it for fewer, larger ones."
         )
+        total_mb = summary["total_bytes"] / 1_000_000
+        largest_mb = (
+            max((b["bytes"] for b in summary["per_bundle"]), default=0) / 1_000_000
+        )
+        st.caption(
+            f"Estimated export size: **{total_mb:.1f} MB** total · largest bundle "
+            f"{largest_mb:.2f} MB. ChatGPT caps each uploaded file at 512 MB / 2M "
+            "tokens, so individual bundles stay well within per-file limits."
+        )
         per = summary["per_bundle"]
         if per:
             chart = pd.DataFrame(
@@ -2523,7 +2546,8 @@ def _render_appeals_visualizer(profile: Profile, docs: Sequence) -> None:
             f"{summary['chunk_count']:,} chunks at ~{chunk_budget:,} tokens "
             f"({CHUNK_STRATEGY_LABELS.get(profile.chunk_strategy, profile.chunk_strategy)}). "
             f"Smallest {summary['smallest']:,} / median {summary['median']:,} / "
-            f"largest {summary['largest']:,} tokens."
+            f"largest {summary['largest']:,} tokens. "
+            f"~{summary['total_bytes'] / 1_000_000:.1f} MB of chunk text."
         )
         if summary["over_budget"]:
             st.warning(
@@ -2614,8 +2638,8 @@ def _render_appeals_export(profile: Profile) -> None:
     )
     profile.appeals_db = st.text_input(
         "Appeals SQLite database path",
-        value=profile.appeals_db,
-        help="Path to pa_appeals.sqlite3.",
+        value=profile.appeals_db or presets.DEFAULT_APPEALS_DB,
+        help=f"Path to pa_appeals.sqlite3. Defaults to {presets.DEFAULT_APPEALS_DB}.",
         key=_key("appeals_db"),
     )
     db_text = profile.appeals_db.strip()
@@ -2650,6 +2674,34 @@ def _render_appeals_export(profile: Profile) -> None:
     st.divider()
     if st.button("Package appeals", type="primary", key=_key("package_appeals")):
         _run_appeals_export(profile, Path(db_text).expanduser())
+
+    _render_context_probe(profile)
+
+
+def _render_context_probe(profile: Profile) -> None:
+    with st.expander("Context probe — measure your workspace's retrieval window", expanded=False):
+        st.caption(
+            "Generates canary bundles + an answer key so you can confirm whether your "
+            "destination (e.g. DHS / ChatGPT Enterprise) really keeps ~110K tokens in "
+            "context. Upload the bundles to a fresh project, ask each answer-key question, "
+            "and see which canaries are retrieved. This only writes local files."
+        )
+        col_n, col_tok = st.columns(2)
+        n = int(col_n.number_input("Canary bundles", min_value=1, value=8, key=_key("probe_n")))
+        tok = int(
+            col_tok.number_input(
+                "Bundle size (tokens)", min_value=1000, value=110000, step=10000, key=_key("probe_tok")
+            )
+        )
+        if st.button("Generate context probe", key=_key("gen_probe")):
+            try:
+                folder = build_context_probe(
+                    _resolved_output_path(profile), bundle_tokens=tok, bundles=n
+                )
+                st.success(f"Context probe written to {folder}")
+                st.code(str(folder), language="text")
+            except Exception as exc:  # noqa: BLE001 - surface failures in the UI
+                st.error(f"Could not generate probe: {exc}")
 
 
 def main() -> None:
