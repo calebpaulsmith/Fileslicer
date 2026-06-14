@@ -20,11 +20,15 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from . import presets
 from .chunking import (
     DEFAULT_HEADING_LEVEL,
+    HEADING_PATH_BOTH,
     HEADING_PATH_MODES,
     HEADING_PATH_OFF,
     STRATEGIES,
+    STRATEGY_HEADINGS,
     STRATEGY_TOKENS,
 )
+from .config import BUNDLING_MODES, SOURCE_KINDS
+from .guidance import DESTINATIONS
 from .markdown_utils import safe_filename
 
 
@@ -64,6 +68,11 @@ ACTIVE_FIELDS: Sequence[str] = (
     "chunk_split_sentences",
     "chunk_fence_aware",
     "chunk_heading_path_mode",
+    "source_kind",
+    "appeals_db",
+    "bundling_mode",
+    "destination",
+    "embedding_model",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -106,6 +115,11 @@ class Profile:
     chunk_split_sentences: bool = False
     chunk_fence_aware: bool = False
     chunk_heading_path_mode: str = HEADING_PATH_OFF
+    source_kind: str = "folder"
+    appeals_db: str = ""
+    bundling_mode: str = "greedy"
+    destination: str = ""
+    embedding_model: str = ""
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -158,6 +172,18 @@ class Profile:
                 f"Unknown chunk_heading_path_mode {self.chunk_heading_path_mode!r}. "
                 f"Choose from {HEADING_PATH_MODES}."
             )
+        if self.source_kind not in SOURCE_KINDS:
+            raise ValueError(
+                f"Unknown source_kind {self.source_kind!r}. Choose from {SOURCE_KINDS}."
+            )
+        if self.bundling_mode not in BUNDLING_MODES:
+            raise ValueError(
+                f"Unknown bundling_mode {self.bundling_mode!r}. Choose from {BUNDLING_MODES}."
+            )
+        if self.destination and self.destination not in DESTINATIONS:
+            raise ValueError(
+                f"Unknown destination {self.destination!r}. Choose from {DESTINATIONS} or ''."
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the profile to a JSON-friendly dict, including a schema tag."""
@@ -189,19 +215,32 @@ class Profile:
         source_dir: Optional[PathLike] = None,
         output_dir: Optional[PathLike] = None,
         project_name: Optional[str] = None,
+        appeals_db: Optional[PathLike] = None,
     ) -> Dict[str, Any]:
         """Convert active fields into kwargs for ``run_packaging_job``.
 
-        ``source_dir``, ``output_dir``, and ``project_name`` accept call-time
-        overrides. The profile itself is never mutated. Inert fields are
-        intentionally omitted; they are not yet honored by the backend.
+        ``source_dir``, ``output_dir``, ``project_name``, and ``appeals_db``
+        accept call-time overrides. The profile itself is never mutated. Inert
+        fields are intentionally omitted; they are not yet honored by the
+        backend. When the profile (or the ``appeals_db`` override) selects the
+        appeals source, a folder ``source_dir`` is not required.
         """
-        resolved_source = source_dir if source_dir is not None else self.default_source_folder
-        if not resolved_source:
+        use_appeals = self.source_kind == "appeals" or appeals_db is not None
+        resolved_db = appeals_db if appeals_db is not None else (self.appeals_db or None)
+        if use_appeals and not resolved_db:
             raise ValueError(
-                "source_dir is required: pass an override or set "
-                "Profile.default_source_folder."
+                "appeals source requires an appeals_db path: pass an override "
+                "or set Profile.appeals_db."
             )
+        if use_appeals:
+            resolved_source: Optional[PathLike] = None
+        else:
+            resolved_source = source_dir if source_dir is not None else self.default_source_folder
+            if not resolved_source:
+                raise ValueError(
+                    "source_dir is required: pass an override or set "
+                    "Profile.default_source_folder."
+                )
         resolved_output = (
             output_dir if output_dir is not None else self.default_output_folder
         )
@@ -210,7 +249,9 @@ class Profile:
         resolved_project = project_name if project_name else (self.project_name or None)
 
         kwargs: Dict[str, Any] = {
-            "source_dir": Path(resolved_source).expanduser(),
+            "source_dir": (
+                Path(resolved_source).expanduser() if resolved_source else None
+            ),
             "output_dir": Path(resolved_output).expanduser(),
             "project_name": resolved_project,
             "target": self.target,
@@ -228,6 +269,11 @@ class Profile:
             "chunk_split_sentences": bool(self.chunk_split_sentences),
             "chunk_fence_aware": bool(self.chunk_fence_aware),
             "chunk_heading_path_mode": self.chunk_heading_path_mode,
+            "source_kind": "appeals" if use_appeals else self.source_kind,
+            "appeals_db": str(Path(resolved_db).expanduser()) if resolved_db else None,
+            "bundling_mode": self.bundling_mode,
+            "destination": self.destination,
+            "embedding_model": self.embedding_model,
         }
         return kwargs
 
@@ -350,6 +396,55 @@ def _make_built_in_profiles() -> Dict[str, Profile]:
             mode="lean",
             include_assets=False,
             copy_data_files=False,
+        ),
+        # Destination-aware templates (encode the packaging research defaults).
+        # They work for a folder source or the appeals SQLite source (pass
+        # --appeals-db / source_kind="appeals" to use the latter).
+        "Claude Project": Profile(
+            profile_name="Claude Project",
+            target="claude",
+            mode="balanced",
+            destination="claude_project",
+        ),
+        "ChatGPT Project": Profile(
+            profile_name="ChatGPT Project",
+            target="chatgpt",
+            mode="balanced",
+            destination="chatgpt_project",
+        ),
+        "DHS / ChatGPT Enterprise": Profile(
+            profile_name="DHS / ChatGPT Enterprise",
+            target="chatgpt",
+            mode="full",
+            max_bundle_tokens=110_000,
+            bundling_mode="medium",
+            destination="chatgpt_enterprise",
+        ),
+        "Self-hosted RAG": Profile(
+            profile_name="Self-hosted RAG",
+            target="rag",
+            mode="balanced",
+            chunk_token_budget=512,
+            chunk_strategy=STRATEGY_HEADINGS,
+            chunk_min_tokens=64,
+            chunk_heading_path_mode=HEADING_PATH_BOTH,
+            destination="self_hosted_rag",
+            include_assets=False,
+        ),
+        # Self-contained local hybrid RAG: cowork MCP server with FTS5 + vector
+        # search. Defaults to the offline hashing embedder; set embedding_model
+        # to "openai:text-embedding-3-small" (or another backend) for real
+        # semantic search (sends chunk text to that provider).
+        "Local Hybrid RAG": Profile(
+            profile_name="Local Hybrid RAG",
+            target="cowork",
+            mode="balanced",
+            chunk_strategy=STRATEGY_HEADINGS,
+            chunk_min_tokens=64,
+            chunk_heading_path_mode=HEADING_PATH_BOTH,
+            destination="self_hosted_rag",
+            embedding_model="hashing",
+            include_assets=False,
         ),
     }
 

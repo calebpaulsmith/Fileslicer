@@ -118,6 +118,11 @@ class ProfileDataclassTests(ProfilesTestCase):
             "chunk_split_sentences",
             "chunk_fence_aware",
             "chunk_heading_path_mode",
+            "source_kind",
+            "appeals_db",
+            "bundling_mode",
+            "destination",
+            "embedding_model",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -389,7 +394,38 @@ class BuiltInProfileTests(ProfilesTestCase):
         "Visual Repair Manual",
         "RAG Ready Export",
         "Lean One-Shot Chat",
+        "Claude Project",
+        "ChatGPT Project",
+        "DHS / ChatGPT Enterprise",
+        "Self-hosted RAG",
+        "Local Hybrid RAG",
     )
+
+    def test_destination_built_ins_encode_research_defaults(self) -> None:
+        dhs = get_built_in_profile("DHS / ChatGPT Enterprise")
+        dhs.validate()
+        self.assertEqual(dhs.bundling_mode, "medium")
+        self.assertEqual(dhs.destination, "chatgpt_enterprise")
+        self.assertEqual(dhs.max_bundle_tokens, 110_000)
+
+        rag = get_built_in_profile("Self-hosted RAG")
+        rag.validate()
+        self.assertEqual(rag.target, "rag")
+        self.assertEqual(rag.chunk_strategy, "headings")
+        self.assertEqual(rag.destination, "self_hosted_rag")
+
+    def test_appeals_kwargs_omit_folder_source(self) -> None:
+        profile = get_built_in_profile("Self-hosted RAG")
+        kwargs = profile.to_packaging_kwargs(appeals_db="C:/data/pa_appeals.sqlite3")
+        self.assertEqual(kwargs["source_kind"], "appeals")
+        self.assertIsNone(kwargs["source_dir"])
+        self.assertIn("pa_appeals.sqlite3", kwargs["appeals_db"])
+
+    def test_validate_rejects_unknown_destination(self) -> None:
+        from packer.profiles import Profile
+
+        with self.assertRaises(ValueError):
+            Profile(profile_name="x", destination="nonsense").validate()
 
     def test_built_in_names_match_spec(self) -> None:
         self.assertEqual(tuple(list_built_in_profiles()), self.EXPECTED_BUILT_INS)

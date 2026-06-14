@@ -190,6 +190,7 @@ Arguments:
 | `--exclude-dirs` | Comma-separated list of directory names to skip, added to the defaults. |
 | `--profile` | Run with a saved profile or built-in template, by name. Supplies source/target/mode and the full chunking configuration; other flags override its values, and `source_dir`, `--target`, and `--mode` become optional. |
 | `--profiles-dir` | Directory to load saved profiles from. Default: `~\.llm_project_packer\profiles`. |
+| `--appeals-db` | Package FEMA appeals from a `pa_rag` SQLite database (`pa_appeals.sqlite3`) instead of scanning a folder. When set, `source_dir` is not required. |
 
 Examples:
 
@@ -200,7 +201,54 @@ python .\pack_project.py ".\kb" --target rag --mode balanced
 python .\pack_project.py ".\big_corpus" --target generic --mode full --max-bundle-tokens 50000
 python .\pack_project.py ".\manuals" --target cowork --mode balanced
 python .\pack_project.py ".\kb" --profile "RAG Ready Export"
+# Package FEMA appeals from a pa_rag SQLite database (no source folder needed):
+python .\pack_project.py --profile "DHS / ChatGPT Enterprise" --appeals-db ..\pa_rag\data\pa_appeals.sqlite3
+python .\pack_project.py --appeals-db ..\pa_rag\data\pa_appeals.sqlite3 --target rag --mode balanced
 ```
+
+### Packaging FEMA appeals (pa_rag) and destination profiles
+
+With `--appeals-db`, FileSlicer reads finalized FEMA second-appeal decisions
+straight from the `pa_rag` `final_appeal_authority` table (plus extracted
+citations) and renders one clean Markdown document per appeal — identity
+header, an overview metadata block, then the decision prose — before bundling
+or chunking. Four destination-aware built-in profiles encode the research
+defaults and add per-destination packaging guidance to the generated `00_*`
+instructions:
+
+- **`Claude Project`** / **`ChatGPT Project`** — complete, well-structured
+  bundles (the platforms re-chunk uploads, so micro-chunking is avoided).
+- **`DHS / ChatGPT Enterprise`** — medium-grained focused bundles at a ~110K
+  token budget (so no content is stranded past the stuffing budget), plus a
+  front-of-corpus `00_CORPUS_OVERVIEW.md` index.
+- **`Self-hosted RAG`** — heading-aligned ~512-token chunks with heading-path
+  breadcrumbs in `rag_ready/chunks.jsonl`.
+- **`Local Hybrid RAG`** — a self-contained local MCP server (`--target cowork`)
+  with **hybrid keyword + vector search**. Appeal chunks carry structured
+  `metadata` (appellant, PA ID, disaster, date, region, status, cited
+  authorities). The server exposes `search` (BM25), `vector_search`, and
+  `hybrid_search` (RRF fusion, optional cross-encoder rerank).
+
+Embeddings for the cowork target are controlled by `--embedding-model`:
+
+```powershell
+# Offline, deterministic, no key (default for the Local Hybrid RAG profile):
+python .\pack_project.py --profile "Local Hybrid RAG" --appeals-db ..\pa_rag\data\pa_appeals.sqlite3
+# Real semantic vectors via an API backend (sends chunk text to the provider):
+python .\pack_project.py --profile "Local Hybrid RAG" --appeals-db ..\pa_rag\data\pa_appeals.sqlite3 --embedding-model openai:text-embedding-3-small
+# Local on-machine embeddings (bge/e5 via sentence-transformers; one-time model download):
+python .\pack_project.py --profile "Local Hybrid RAG" --appeals-db ..\pa_rag\data\pa_appeals.sqlite3 --embedding-model local:bge-small-en-v1.5
+```
+
+Embedder specs: `hashing` (offline, lexical placeholder), `openai:<model>`,
+`voyage:<model>`, or `local:<model>` (e.g. `local:bge-small-en-v1.5`,
+`local:e5-base-v2`). Local models run inference on your machine after a one-time
+download and never send text to a provider.
+
+The generated `mcp_server/` runs locally over stdio; you register it with your
+MCP client by hand (see its `README.md`). API embedders need the matching
+`OPENAI_API_KEY` / `VOYAGE_API_KEY` and provider package at both export and
+query time; without them the server falls back to keyword search.
 
 `--profile` accepts the name of a profile saved by the Streamlit UI (from
 `~\.llm_project_packer\profiles\`) or one of the built-in templates

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Mapping, Optional
 
 from . import markdown_utils as mdu
+from .chunking import DEFAULT_HEADING_LEVEL, chunk_markdown_by_headings_with_reasons
 from .manifest import ManifestEntry
 from .token_estimator import estimate_tokens, estimator_backend
 
@@ -19,6 +20,7 @@ class ConvertedDoc:
     body_markdown: str  # the converted body, WITHOUT the identity header
     header_markdown: str  # YAML-style identity header
     token_estimate: int
+    metadata: Dict[str, Any] = field(default_factory=dict)  # source-specific record metadata
 
     @property
     def total_markdown(self) -> str:
@@ -95,6 +97,68 @@ def split_into_bundles(
     return bundles
 
 
+def _join_notes(existing: str, addition: str) -> str:
+    existing = (existing or "").strip()
+    return f"{existing} {addition}".strip() if existing else addition
+
+
+def split_doc_at_headings(
+    doc: ConvertedDoc,
+    target_tokens: int,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> List[ConvertedDoc]:
+    """Split one oversize document into part documents at its major headings.
+
+    Used by the medium-grained bundling mode so a single document larger than
+    the per-bundle budget is broken into focused, in-budget files at major
+    heading boundaries instead of becoming one stranded oversize bundle. A
+    document already within ``target_tokens``, or one with no headings to split
+    on, is returned unchanged as a single-element list. Parts get derived
+    ``DOC_xxxx_pNN`` ids and explanatory manifest notes.
+    """
+    if target_tokens <= 0 or doc.token_estimate <= target_tokens:
+        return [doc]
+    body = doc.body_markdown.strip()
+    pairs = chunk_markdown_by_headings_with_reasons(body, target_tokens, heading_level)
+    if len(pairs) <= 1:
+        return [doc]
+    total = len(pairs)
+    parts: List[ConvertedDoc] = []
+    for i, (text, _reason) in enumerate(pairs, start=1):
+        entry = replace(
+            doc.entry,
+            doc_id=f"{doc.entry.doc_id}_p{i:02d}",
+            notes=_join_notes(doc.entry.notes, f"Part {i} of {total} (medium heading split)"),
+        )
+        part = make_converted_doc(entry, text)
+        entry.token_estimate = part.token_estimate
+        entry.char_count = len(text)
+        entry.word_count = len(text.split())
+        parts.append(part)
+    return parts
+
+
+def split_into_bundles_medium(
+    docs: List[ConvertedDoc],
+    target_tokens: int,
+    heading_level: int = DEFAULT_HEADING_LEVEL,
+) -> List[Bundle]:
+    """Medium-grained bundling: split oversize docs at headings, then bin-pack.
+
+    Each document larger than ``target_tokens`` is first broken into in-budget
+    part documents at major headings (see :func:`split_doc_at_headings`); the
+    resulting documents are then packed with the same greedy packer and
+    byte-identical numbering as :func:`split_into_bundles`. The intent (for the
+    ChatGPT Enterprise / "DHS chat" destination) is medium-grained focused
+    files: no single bundle exceeds the stuffing budget and no content is
+    stranded deep inside an oversize file.
+    """
+    prepared: List[ConvertedDoc] = []
+    for doc in docs:
+        prepared.extend(split_doc_at_headings(doc, target_tokens, heading_level))
+    return split_into_bundles(prepared, target_tokens)
+
+
 def write_bundle(
     bundle: Bundle,
     output_dir: Path,
@@ -149,8 +213,18 @@ def write_bundle(
     return bundle_path
 
 
-def make_converted_doc(entry: ManifestEntry, body_markdown: str) -> ConvertedDoc:
-    """Build a ConvertedDoc and compute its token estimate including the header."""
+def make_converted_doc(
+    entry: ManifestEntry,
+    body_markdown: str,
+    metadata: Optional[Mapping[str, Any]] = None,
+) -> ConvertedDoc:
+    """Build a ConvertedDoc and compute its token estimate including the header.
+
+    ``metadata`` is optional source-specific record metadata (e.g. an appeal's
+    appellant, disaster, and cited authorities) that downstream RAG exports
+    attach to each chunk; it defaults to empty so folder-sourced documents are
+    unaffected.
+    """
     header = mdu.doc_header(
         doc_id=entry.doc_id,
         source_file=entry.source_file,
@@ -164,4 +238,5 @@ def make_converted_doc(entry: ManifestEntry, body_markdown: str) -> ConvertedDoc
         body_markdown=body_markdown or "",
         header_markdown=header,
         token_estimate=tokens,
+        metadata=dict(metadata) if metadata else {},
     )
