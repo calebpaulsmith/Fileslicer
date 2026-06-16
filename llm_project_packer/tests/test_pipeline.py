@@ -71,6 +71,77 @@ class PipelineTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_classify_documents_separates_policy_and_appeal_tiers(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "Public Assistance Policy Guide.md").write_text(
+                "# PAPPG\n\nGoverning policy content.\n", encoding="utf-8"
+            )
+            (source / "FEMA-4021-DR-NJ Township of Vernon appeal.md").write_text(
+                "# Second Appeal\n\nAppeal decision content.\n", encoding="utf-8"
+            )
+            (source / "scratch_notes.txt").write_text("misc", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="chatgpt",
+                mode="balanced",
+                bundling_mode="medium",
+                destination="chatgpt_enterprise",
+                classify_documents=True,
+            )
+            self.assertEqual(result.failed_count, 0)
+
+            overview = (result.export_dir / "00_CORPUS_OVERVIEW.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("Source tiers (authority first)", overview)
+            self.assertIn("PA Policy / Guidance", overview)
+            self.assertIn("Appeal / Case Decision", overview)
+
+            manifest = json.loads(
+                (result.export_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            by_file = {e["source_file"]: e for e in manifest["entries"]}
+            policy = by_file["Public Assistance Policy Guide.md"]
+            appeal = by_file["FEMA-4021-DR-NJ Township of Vernon appeal.md"]
+            # Categories recorded in the manifest notes.
+            self.assertIn("Category: PA Policy / Guidance", policy["notes"])
+            self.assertIn("Category: Appeal / Case Decision", appeal["notes"])
+            # Tiers never co-mingle: policy and appeal land in different bundles,
+            # with policy (the authority) sorting first.
+            self.assertNotEqual(policy["output_bundle"], appeal["output_bundle"])
+            self.assertLess(policy["output_bundle"], appeal["output_bundle"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_doc_categories_override_filename_guess(self) -> None:
+        root = self.make_tempdir()
+        try:
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            (source / "PAPPG.md").write_text("# Guide\n\nx\n", encoding="utf-8")
+
+            result = run_packaging_job(
+                source,
+                output,
+                target="chatgpt",
+                mode="balanced",
+                doc_categories={"PAPPG.md": "appeal"},
+            )
+            manifest = json.loads(
+                (result.export_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            entry = manifest["entries"][0]
+            self.assertIn("Category: Appeal / Case Decision", entry["notes"])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_greedy_default_writes_no_overview_or_guidance(self) -> None:
         root = self.make_tempdir()
         try:

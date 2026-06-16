@@ -400,6 +400,37 @@ Already shipped:
     (`exporters.write_corpus_overview`). Intended for the ChatGPT Enterprise /
     "DHS chat" destination, where one mega-bundle strands content past the
     ~110K stuffing budget and microchunks fragment it.
+  - Document classification / source-hierarchy tiers
+    (`classify_documents=True`, default off = byte-identical; an additive
+    folder-source change). `packer/doc_category.py` assigns each
+    folder-sourced document a coarse tier — `policy` (authoritative PA
+    policy/guidance, e.g. the PAPPG), `appeal` (individual second-appeal /
+    case decisions), or `other` — via `guess_category(path)` (filename
+    heuristics: policy tokens win over appeal tokens / `NNNN-DR|EM` disaster
+    patterns) with explicit per-file overrides. The pipeline
+    (`_convert_files` + `_bundle_documents_by_category`) resolves each doc's
+    category, records it in the manifest notes and `ConvertedDoc.metadata`,
+    and bundles **per tier in `CATEGORY_ORDER`** (policy first, as the
+    governing authority) so a bundle never mixes policy and appeals; bundles
+    are then concatenated and renumbered with a shared prefix width
+    (`bundler.assign_bundle_prefix_width`). `write_corpus_overview` gains a
+    "Tier" column + per-tier summary when `bundle_categories` is supplied.
+    `policy`-tier PDFs are re-rendered by `packer/pdf_structure.py`
+    (`restructure_pdf_markdown`) before bundling: it strips repeated running
+    headers/footers and bare page-number lines, promotes `Chapter N: Title`
+    lines to `##` and lettered/Roman section titles to `###`, normalizes
+    symbol-font bullets, and reflows hard-wrapped lines into paragraphs — so
+    medium bundling splits the PAPPG at its 12 real chapters instead of
+    arbitrary pages (it never raises; returns input unchanged on any
+    problem or when there are no `## Page N` markers). Wired through
+    `run_packaging_job(classify_documents=..., doc_categories=...)` (passing
+    `doc_categories` implies classification on), profile-bound via the new
+    active field `Profile.classify_documents`, re-runnable from the CLI via
+    `--profile "DHS PA Policy + Appeals"`, and driven in the UI by the
+    "Source classification (policy vs. appeals)" section in file review
+    (a per-file Tier selectbox over the included files, defaulting to the
+    guess; the toggle is saved to the profile). Intended for the DHS /
+    ChatGPT Enterprise destination with a mixed PAPPG-policy + appeals corpus.
 - Local embedding RAG (Phase B / V3 of the appeals repurpose; lifts the V2
   embeddings exclusion — see Explicit exclusions):
   - **Metadata-rich chunks.** `ConvertedDoc` carries an optional `metadata`
@@ -446,7 +477,7 @@ Already shipped:
     override source/output/project/appeals-db at call time without mutating the
     profile. When the profile (or the `appeals_db` override) selects the
     appeals source, a folder `source_dir` is not required.
-  - `profiles.ACTIVE_FIELDS` lists the twenty-three fields that influence
+  - `profiles.ACTIVE_FIELDS` lists the twenty-four fields that influence
     packaging today (`project_name`, `default_source_folder`,
     `default_output_folder`, `target`, `mode`, `max_bundle_tokens`,
     `include_extensions`, `exclude_dirs`, `exclude_files`,
@@ -454,18 +485,20 @@ Already shipped:
     `chunk_heading_level`, `chunk_min_tokens`, `chunk_overlap_tokens`,
     `chunk_split_sentences`, `chunk_fence_aware`,
     `chunk_heading_path_mode`, `source_kind`, `appeals_db`, `bundling_mode`,
-    `destination`, `embedding_model`).
+    `destination`, `embedding_model`, `classify_documents`).
     `profiles.INERT_FIELDS` lists
     seven fields that are stored and round-tripped but not yet honored by
     the backend (`include_assets`, `copy_data_files`,
     `spreadsheet_preview_rows`, `include_pdf_page_headers`,
     `include_source_metadata`, `bundle_separator_style`, `create_zip`).
-  - Ten built-in templates available via `get_built_in_profile(name)` and
+  - Eleven built-in templates available via `get_built_in_profile(name)` and
     `list_built_in_profiles()`: `ChatGPT Balanced Project`,
     `Claude Full Project`, `Visual Repair Manual`, `RAG Ready Export`,
     `Lean One-Shot Chat`, and the destination-aware
     `Claude Project`, `ChatGPT Project`, `DHS / ChatGPT Enterprise` (medium
-    bundling at a 110K budget), `Self-hosted RAG` (heading-aligned 512-token
+    bundling at a 110K budget), `DHS PA Policy + Appeals` (medium bundling at
+    110K plus `classify_documents=True` for a mixed PAPPG-policy + appeal
+    corpus), `Self-hosted RAG` (heading-aligned 512-token
     chunks with heading-path breadcrumbs), and `Local Hybrid RAG`
     (`target=cowork` with the offline `hashing` embedder for a self-contained
     BM25 + vector MCP server). Each call returns an independent copy.
@@ -508,12 +541,13 @@ Already shipped:
   This makes structured records (e.g., scraped FEMA appeal JSON) flow
   through scan, chunk review, and export with field-aligned headings.
 - Automated tests under `llm_project_packer/tests/`:
-  `test_pipeline.py` (38 cases), `test_chunking.py` (60 cases),
+  `test_pipeline.py` (40 cases), `test_chunking.py` (60 cases),
   `test_readers.py` (6 cases), `test_profiles.py` (37 cases),
   `test_cli.py` (14 cases), `test_bundler.py` (9 cases),
   `test_appeals_source.py` (10 cases), `test_embedder.py` (9 cases),
-  `test_cowork_hybrid.py` (3 cases), `test_appeals_quality.py` (7 cases), and
-  `test_context_probe.py` (4 cases) — 199 in total; passes with
+  `test_cowork_hybrid.py` (3 cases), `test_appeals_quality.py` (7 cases),
+  `test_context_probe.py` (4 cases), `test_doc_category.py` (10 cases), and
+  `test_pdf_structure.py` (8 cases) — 217 in total; passes with
   `python -m unittest discover -s tests` or `pytest`.
 
 V2 should focus next on (in roughly this order):
@@ -632,7 +666,7 @@ early.
   `presets`, `config`, `scanner`, `readers`, `markdown_utils`,
   `token_estimator`, `manifest`, `bundler`, `chunking`, `exporters`,
   `pipeline`, `profiles`, `appeals_source`, `guidance`, `embedder`,
-  `context_probe`.
+  `context_probe`, `doc_category`, `pdf_structure`.
 - Readers must never raise on a single bad file; they catch their own
   exceptions and return a `ReaderResult` with `status="failed"` and a useful
   `notes` string.
@@ -671,7 +705,7 @@ Run from the repo root (`C:\Users\caleb\OneDrive\Desktop\Scripts\Fileslicer`):
 
 ```powershell
 # Imports parse and the estimator backend resolves
-.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import appeals_source, bundler, config, context_probe, embedder, exporters, guidance, manifest, markdown_utils, pipeline, presets, profiles, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
+.\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer import appeals_source, bundler, config, context_probe, doc_category, embedder, exporters, guidance, manifest, markdown_utils, pdf_structure, pipeline, presets, profiles, readers, scanner, token_estimator; print('ok', token_estimator.estimator_backend())"
 
 # All ten built-in profile templates load and validate
 .\.venv\Scripts\python.exe -c "import sys; sys.path.insert(0, 'llm_project_packer'); from packer.profiles import list_built_in_profiles, get_built_in_profile; [get_built_in_profile(n).validate() for n in list_built_in_profiles()]; print('built-ins ok:', list_built_in_profiles())"
@@ -692,6 +726,7 @@ python pack_project.py .\does\not\exist --target chatgpt --mode balanced  # conf
 python pack_project.py .\sample_input --profile "RAG Ready Export" --output .\test_output   # rag/balanced with 800-token chunks from the template
 python pack_project.py .\sample_input --profile "RAG Ready Export" --target generic --mode lean --output .\test_output  # flags override the profile
 python pack_project.py .\sample_input --profile "No Such Profile"  # error listing saved + built-in names, exit code 2
+python pack_project.py .\sample_input --profile "DHS PA Policy + Appeals" --output .\test_output  # classify policy vs appeals: PAPPG restructured + split at chapters, policy/appeal bundles separate, 00_CORPUS_OVERVIEW has a Tier column
 
 # Appeals source (reads pa_rag's pa_appeals.sqlite3; --appeals-db bare uses presets.DEFAULT_APPEALS_DB)
 python pack_project.py --profile "DHS / ChatGPT Enterprise" --appeals-db --output .\test_output   # medium bundling + 00_CORPUS_OVERVIEW + DHS guidance; appeals carry URL + PDF

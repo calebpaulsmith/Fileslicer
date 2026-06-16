@@ -42,6 +42,12 @@ from packer.chunking import (  # noqa: E402
     STRATEGY_TOKENS,
     match_heading_patterns,
 )
+from packer.doc_category import (  # noqa: E402
+    CATEGORY_LABELS,
+    CATEGORIES,
+    guess_category,
+    normalize_category,
+)
 from packer.exporters import InstructionContext, write_instructions  # noqa: E402
 from packer.guidance import (  # noqa: E402
     DESTINATION_LABELS,
@@ -81,6 +87,7 @@ SESSION_KEY_SCAN_CACHE = "scan_cache"
 SESSION_KEY_FILE_SELECTIONS = "file_review_selections"
 SESSION_KEY_FILE_SELECTION_REVISIONS = "file_review_selection_revisions"
 SESSION_KEY_CHUNK_SELECTIONS = "chunk_review_selections"
+SESSION_KEY_DOC_CATEGORIES = "doc_category_selections"
 SESSION_KEY_CHUNK_PREVIEWS = "chunk_preview_cache"
 SESSION_KEY_CHUNK_REVISIONS = "chunk_review_revisions"
 SESSION_KEY_CORPUS_AUDIT = "corpus_chunk_audit"
@@ -1117,9 +1124,125 @@ def _render_file_review(
         and not selections.get(str(scanned.relative_path), True)
     )
 
+    _render_source_classification(key, files, selections)
     _render_chunk_review(key, files, selections)
     _render_packaging_settings(key, files, selections)
     _render_preview_and_export(key, files, selections)
+
+
+_CATEGORY_LABEL_TO_VALUE = {label: value for value, label in CATEGORY_LABELS.items()}
+
+
+def _doc_category_store(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+) -> Dict[str, str]:
+    """Return the per-scan map of {relative_path: category} overrides."""
+    root = st.session_state.setdefault(SESSION_KEY_DOC_CATEGORIES, {})
+    return root.setdefault(repr(key), {})
+
+
+def _resolved_doc_categories(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> Dict[str, str]:
+    """Resolve each included file's category from overrides, else the guess."""
+    overrides = _doc_category_store(key)
+    resolved: Dict[str, str] = {}
+    for scanned in files:
+        rel = str(scanned.relative_path)
+        if not selections.get(rel, _is_supported(scanned)):
+            continue
+        rel_posix = scanned.relative_path.as_posix()
+        if rel in overrides:
+            resolved[rel_posix] = normalize_category(overrides[rel])
+        else:
+            resolved[rel_posix] = guess_category(rel_posix)
+    return resolved
+
+
+def _render_source_classification(
+    key: Tuple[str, Tuple[str, ...], Tuple[str, ...]],
+    files: Sequence[ScannedFile],
+    selections: Dict[str, bool],
+) -> None:
+    profile = _profile()
+    st.subheader("Source classification (policy vs. appeals)")
+    st.caption(
+        "Separate a mixed FEMA Public Assistance corpus into tiers: PA policy / "
+        "guidance bundles first as the governing authority and is re-rendered "
+        "with heading-aware structure (large policy PDFs split at chapters), "
+        "while appeal / case decisions stay as focused, complete files. "
+        "Categories are guessed from file names; override any below."
+    )
+    classify = st.checkbox(
+        "Classify documents into policy / appeal tiers",
+        value=bool(profile.classify_documents),
+        key=f"classify_{_scan_key_id(key)}",
+        help=(
+            "When on, bundles never mix policy and appeals, and the corpus "
+            "overview shows a Tier column. Saved to the profile."
+        ),
+    )
+    profile.classify_documents = classify
+    if not classify:
+        return
+
+    overrides = _doc_category_store(key)
+    included = [
+        scanned
+        for scanned in files
+        if selections.get(str(scanned.relative_path), _is_supported(scanned))
+    ]
+    if not included:
+        st.info("No included files to classify.")
+        return
+
+    rows = []
+    for scanned in included:
+        rel = str(scanned.relative_path)
+        current = overrides.get(rel) or guess_category(scanned.relative_path.as_posix())
+        rows.append(
+            {
+                "file_name": scanned.relative_path.name,
+                "relative_path": rel,
+                "tier": CATEGORY_LABELS[normalize_category(current)],
+            }
+        )
+
+    edited = st.data_editor(
+        rows,
+        hide_index=True,
+        key=f"classify_editor_{_scan_key_id(key)}",
+        **_dataframe_layout_kwargs(),
+        column_config={
+            "file_name": st.column_config.TextColumn("file_name"),
+            "relative_path": st.column_config.TextColumn("relative_path"),
+            "tier": st.column_config.SelectboxColumn(
+                "tier",
+                options=[CATEGORY_LABELS[c] for c in CATEGORIES],
+                required=True,
+            ),
+        },
+        disabled=["file_name", "relative_path"],
+    )
+    for record in _editor_records(edited):
+        rel = record.get("relative_path")
+        label = record.get("tier")
+        if rel and label in _CATEGORY_LABEL_TO_VALUE:
+            overrides[rel] = _CATEGORY_LABEL_TO_VALUE[label]
+
+    counts: Dict[str, int] = {}
+    for scanned in included:
+        rel = str(scanned.relative_path)
+        cat = normalize_category(
+            overrides.get(rel) or guess_category(scanned.relative_path.as_posix())
+        )
+        counts[cat] = counts.get(cat, 0) + 1
+    summary = ", ".join(
+        f"{CATEGORY_LABELS[c]}: {counts[c]}" for c in CATEGORIES if counts.get(c)
+    )
+    st.caption(f"Tier counts — {summary}")
 
 
 def _chunk_store(
@@ -2208,6 +2331,11 @@ def _render_preview_and_export(
             profile,
             included_paths,
             included_count,
+            doc_categories=(
+                _resolved_doc_categories(key, files, selections)
+                if profile.classify_documents
+                else None
+            ),
             chunk_selections=chunk_selections,
             chunk_token_budget=chunk_token_budget,
             chunk_strategy=chunk_strategy,
@@ -2230,6 +2358,7 @@ def _run_export(
     included_paths: Sequence[str],
     included_count: int,
     *,
+    doc_categories: Dict[str, str] | None = None,
     chunk_selections: Dict[str, List[int]] | None = None,
     chunk_token_budget: int | None = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -2280,6 +2409,8 @@ def _run_export(
             include_extensions=_resolved_include_extensions(profile),
             exclude_dirs=_resolved_exclude_dirs(profile),
             included_files=included_paths,
+            classify_documents=profile.classify_documents,
+            doc_categories=doc_categories,
             chunk_selections=chunk_selections or None,
             chunk_token_budget=chunk_token_budget,
             chunk_strategy=chunk_strategy,

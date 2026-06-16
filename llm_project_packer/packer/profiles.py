@@ -73,6 +73,7 @@ ACTIVE_FIELDS: Sequence[str] = (
     "bundling_mode",
     "destination",
     "embedding_model",
+    "classify_documents",
 )
 
 # Fields that are stored and round-tripped, but not yet honored by the
@@ -120,6 +121,7 @@ class Profile:
     bundling_mode: str = "greedy"
     destination: str = ""
     embedding_model: str = ""
+    classify_documents: bool = False
     include_assets: bool = True
     copy_data_files: bool = True
     spreadsheet_preview_rows: int = 25
@@ -274,6 +276,7 @@ class Profile:
             "bundling_mode": self.bundling_mode,
             "destination": self.destination,
             "embedding_model": self.embedding_model,
+            "classify_documents": bool(self.classify_documents),
         }
         return kwargs
 
@@ -419,6 +422,20 @@ def _make_built_in_profiles() -> Dict[str, Profile]:
             max_bundle_tokens=110_000,
             bundling_mode="medium",
             destination="chatgpt_enterprise",
+        ),
+        # Mixed FEMA Public Assistance corpus (PAPPG policy + appeal decisions)
+        # for a DHS / ChatGPT Enterprise workspace: classify documents into
+        # source-hierarchy tiers so policy bundles separately and first (as the
+        # governing authority) and policy PDFs are restructured for
+        # heading-aware medium-grained splitting.
+        "DHS PA Policy + Appeals": Profile(
+            profile_name="DHS PA Policy + Appeals",
+            target="chatgpt",
+            mode="full",
+            max_bundle_tokens=110_000,
+            bundling_mode="medium",
+            destination="chatgpt_enterprise",
+            classify_documents=True,
         ),
         "Self-hosted RAG": Profile(
             profile_name="Self-hosted RAG",
