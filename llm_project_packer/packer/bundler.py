@@ -88,12 +88,21 @@ def split_into_bundles(
     if current.docs:
         bundles.append(current)
 
+    assign_bundle_prefix_width(bundles)
+    return bundles
+
+
+def assign_bundle_prefix_width(bundles: List[Bundle]) -> List[Bundle]:
+    """Set a shared, width-uniform numeric prefix on every bundle (in place).
+
+    The width is chosen so the highest bundle number still fits, keeping every
+    bundle sorting after the ``00_*`` instructions and ``01_*`` manifest.
+    """
     prefix_width = 2
     while 2 * 10 ** (prefix_width - 2) + len(bundles) - 1 > 10**prefix_width - 1:
         prefix_width += 1
     for bundle in bundles:
         bundle.prefix_width = prefix_width
-
     return bundles
 
 

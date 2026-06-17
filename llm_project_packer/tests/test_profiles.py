@@ -123,6 +123,7 @@ class ProfileDataclassTests(ProfilesTestCase):
             "bundling_mode",
             "destination",
             "embedding_model",
+            "classify_documents",
         }
         self.assertEqual(set(kwargs.keys()), expected_keys)
         for inert in INERT_FIELDS:
@@ -397,6 +398,7 @@ class BuiltInProfileTests(ProfilesTestCase):
         "Claude Project",
         "ChatGPT Project",
         "DHS / ChatGPT Enterprise",
+        "DHS PA Policy + Appeals",
         "Self-hosted RAG",
         "Local Hybrid RAG",
     )
@@ -407,6 +409,13 @@ class BuiltInProfileTests(ProfilesTestCase):
         self.assertEqual(dhs.bundling_mode, "medium")
         self.assertEqual(dhs.destination, "chatgpt_enterprise")
         self.assertEqual(dhs.max_bundle_tokens, 110_000)
+        self.assertFalse(dhs.classify_documents)
+
+        dhs_mixed = get_built_in_profile("DHS PA Policy + Appeals")
+        dhs_mixed.validate()
+        self.assertTrue(dhs_mixed.classify_documents)
+        self.assertEqual(dhs_mixed.bundling_mode, "medium")
+        self.assertEqual(dhs_mixed.destination, "chatgpt_enterprise")
 
         rag = get_built_in_profile("Self-hosted RAG")
         rag.validate()

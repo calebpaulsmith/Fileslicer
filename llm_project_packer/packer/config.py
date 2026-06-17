@@ -36,6 +36,7 @@ class PackerConfig:
     bundling_mode: str = "greedy"
     destination: str = ""
     embedding_model: str = ""
+    classify_documents: bool = False
 
     def validate(self) -> None:
         if self.target not in presets.TARGETS:

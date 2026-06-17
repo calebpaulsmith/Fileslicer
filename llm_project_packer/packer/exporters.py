@@ -6,7 +6,7 @@ import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import Dict, List, Mapping, Optional
 
 from .bundler import Bundle, ConvertedDoc
 from .chunking import (
@@ -383,6 +383,7 @@ def write_corpus_overview(
     project_name: str,
     manifest: Manifest,
     bundles: List[Bundle],
+    bundle_categories: Optional[Mapping[str, str]] = None,
 ) -> Path:
     """Write ``00_CORPUS_OVERVIEW.md`` — a front-of-corpus index of every document.
 
@@ -390,7 +391,14 @@ def write_corpus_overview(
     the reader) sees an overview/index first: which document landed in which
     bundle, with key identity columns. Sorts among the ``00_*`` instruction
     files, ahead of the bundles.
+
+    ``bundle_categories`` (``{bundle_filename: category}``) is supplied when
+    documents were classified into source-hierarchy tiers; it adds a "Tier"
+    column and a per-tier summary so the policy authority and appeal/case
+    decisions are visibly separated.
     """
+    from .doc_category import CATEGORY_LABELS
+
     bundle_by_doc = {
         doc_id: bundle.filename for bundle in bundles for doc_id in bundle.doc_ids
     }
@@ -406,16 +414,44 @@ def write_corpus_overview(
         "Read it first to locate a source, then open the named bundle.",
         "",
     ]
-    headers = ["DOC_ID", "Source File", "Tokens", "Bundle"]
-    rows = [
-        (
-            e.doc_id,
-            e.source_file,
-            f"{e.token_estimate:,}",
-            bundle_by_doc.get(e.doc_id, "-"),
-        )
-        for e in ok_entries
-    ]
+
+    def tier_for(doc_id: str) -> str:
+        if not bundle_categories:
+            return ""
+        category = bundle_categories.get(bundle_by_doc.get(doc_id, ""), "")
+        return CATEGORY_LABELS.get(category, category)
+
+    if bundle_categories:
+        tiers: Dict[str, int] = {}
+        for entry in ok_entries:
+            tiers[tier_for(entry.doc_id) or "—"] = tiers.get(tier_for(entry.doc_id) or "—", 0) + 1
+        lines.append("**Source tiers (authority first):**")
+        lines.append("")
+        for label, count in tiers.items():
+            lines.append(f"- {label}: {count} document(s)")
+        lines.append("")
+        headers = ["DOC_ID", "Source File", "Tier", "Tokens", "Bundle"]
+        rows = [
+            (
+                e.doc_id,
+                e.source_file,
+                tier_for(e.doc_id) or "—",
+                f"{e.token_estimate:,}",
+                bundle_by_doc.get(e.doc_id, "-"),
+            )
+            for e in ok_entries
+        ]
+    else:
+        headers = ["DOC_ID", "Source File", "Tokens", "Bundle"]
+        rows = [
+            (
+                e.doc_id,
+                e.source_file,
+                f"{e.token_estimate:,}",
+                bundle_by_doc.get(e.doc_id, "-"),
+            )
+            for e in ok_entries
+        ]
     lines.append(rows_to_markdown_table(headers, rows))
     lines.append("")
     return _write(output_dir / "00_CORPUS_OVERVIEW.md", lines)

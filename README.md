@@ -212,7 +212,7 @@ With `--appeals-db`, FileSlicer reads finalized FEMA second-appeal decisions
 straight from the `pa_rag` `final_appeal_authority` table (plus extracted
 citations) and renders one clean Markdown document per appeal — identity
 header, an overview metadata block, then the decision prose — before bundling
-or chunking. Four destination-aware built-in profiles encode the research
+or chunking. Several destination-aware built-in profiles encode the research
 defaults and add per-destination packaging guidance to the generated `00_*`
 instructions:
 
@@ -221,6 +221,16 @@ instructions:
 - **`DHS / ChatGPT Enterprise`** — medium-grained focused bundles at a ~110K
   token budget (so no content is stranded past the stuffing budget), plus a
   front-of-corpus `00_CORPUS_OVERVIEW.md` index.
+- **`DHS PA Policy + Appeals`** — the DHS / ChatGPT Enterprise profile plus
+  document classification (`classify_documents`): a mixed FEMA Public
+  Assistance folder is split into source-hierarchy tiers so the authoritative
+  policy guide (e.g. the PAPPG) bundles first and separately from individual
+  appeal / case decisions. Policy PDFs are re-rendered with heading-aware
+  structure (running-header/page-number boilerplate stripped, chapters and
+  sections promoted to Markdown headings), so a large policy PDF splits at its
+  real chapters instead of arbitrary pages, and `00_CORPUS_OVERVIEW.md` gains a
+  **Tier** column. Tiers are guessed from file names and can be overridden
+  per file in the UI's "Source classification" controls.
 - **`Self-hosted RAG`** — heading-aligned ~512-token chunks with heading-path
   breadcrumbs in `rag_ready/chunks.jsonl`.
 - **`Local Hybrid RAG`** — a self-contained local MCP server (`--target cowork`)

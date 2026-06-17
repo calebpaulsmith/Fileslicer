@@ -9,14 +9,23 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import presets
+from . import pdf_structure
 from .appeals_source import load_appeal_docs
 from .bundler import (
     ConvertedDoc,
+    assign_bundle_prefix_width,
     make_converted_doc,
     split_doc_at_headings,
     split_into_bundles,
     split_into_bundles_medium,
     write_bundle,
+)
+from .doc_category import (
+    CATEGORY_LABELS,
+    CATEGORY_ORDER,
+    CATEGORY_POLICY,
+    normalize_overrides,
+    resolve_category,
 )
 from .chunking import (
     DEFAULT_HEADING_LEVEL,
@@ -88,6 +97,8 @@ def run_packaging_job(
     bundling_mode: str = "greedy",
     destination: str = "",
     embedding_model: str = "",
+    classify_documents: bool = False,
+    doc_categories: Optional[Mapping[str, str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -147,6 +158,14 @@ def run_packaging_job(
     enclosing heading breadcrumb to ``rag_ready/chunks.jsonl`` — as a
     ``heading_path`` field, prefixed into the chunk text, or both. It does
     not move boundaries, so it never affects chunk indices or selections.
+
+    ``classify_documents`` (default off = byte-identical) groups folder-sourced
+    documents into source-hierarchy tiers — PA policy/guidance vs. appeal/case
+    decisions — so each tier bundles separately (policy first, as the governing
+    authority) and policy PDFs are re-rendered with heading-aware structure for
+    medium-grained splitting. ``doc_categories`` maps source-relative paths to
+    an explicit category (``policy``/``appeal``/``other``), overriding the
+    filename-based guess; passing it turns classification on.
     """
     del options
     appeals_db_path = (
@@ -187,12 +206,14 @@ def run_packaging_job(
         bundling_mode=bundling_mode,
         destination=destination,
         embedding_model=embedding_model,
+        classify_documents=classify_documents or bool(doc_categories),
     )
     cfg.validate()
     return run_packaging_config(
         cfg,
         included_files=included_file_list,
         exclude_files=exclude_files,
+        doc_categories=doc_categories,
         chunk_selections=chunk_selections,
         chunk_token_budget=chunk_token_budget,
         chunk_strategy=chunk_strategy,
@@ -212,6 +233,7 @@ def run_packaging_config(
     *,
     included_files: Optional[Iterable[Path | str]] = None,
     exclude_files: Optional[Sequence[str]] = None,
+    doc_categories: Optional[Mapping[str, str]] = None,
     chunk_selections: Optional[Mapping[str, Sequence[int]]] = None,
     chunk_token_budget: Optional[int] = None,
     chunk_strategy: str = STRATEGY_TOKENS,
@@ -319,7 +341,16 @@ def run_packaging_config(
             assets_dir=assets_dir,
             data_dir=data_dir,
         )
-        converted_docs = _convert_files(files, reader_ctx, manifest, warnings, errors, emit)
+        converted_docs = _convert_files(
+            files,
+            reader_ctx,
+            manifest,
+            warnings,
+            errors,
+            emit,
+            classify=cfg.classify_documents,
+            doc_categories=doc_categories,
+        )
     effective_chunk_tokens = chunk_token_budget or cfg.max_bundle_tokens
     if chunk_min_tokens and chunk_min_tokens >= effective_chunk_tokens:
         warning = (
@@ -348,19 +379,31 @@ def run_packaging_config(
     bundle_paths: List[Path] = []
     bundle_filenames: List[str] = []
     chunked_targets = {"rag", "cowork"}
+    bundle_categories: Dict[str, str] = {}
     if cfg.target not in chunked_targets:
         emit("blank", "")
         emit("bundle_start", "Bundling documents...")
-        if cfg.bundling_mode == "medium":
-            converted_docs = _prepare_medium_docs(
+        if cfg.classify_documents:
+            bundles, bundle_categories = _bundle_documents_by_category(
                 converted_docs,
                 manifest,
                 cfg.max_bundle_tokens,
+                cfg.bundling_mode,
                 chunk_heading_level,
                 emit,
                 warnings,
             )
-        bundles = split_into_bundles(converted_docs, cfg.max_bundle_tokens)
+        else:
+            if cfg.bundling_mode == "medium":
+                converted_docs = _prepare_medium_docs(
+                    converted_docs,
+                    manifest,
+                    cfg.max_bundle_tokens,
+                    chunk_heading_level,
+                    emit,
+                    warnings,
+                )
+            bundles = split_into_bundles(converted_docs, cfg.max_bundle_tokens)
         emit("bundle_done", f"  Created {len(bundles)} bundles.", {"count": len(bundles)})
         for bundle in bundles:
             path = write_bundle(
@@ -380,9 +423,13 @@ def run_packaging_config(
                 {"path": path, "tokens": bundle.total_tokens, "doc_count": len(bundle.docs)},
             )
         assign_bundles_to_manifest(manifest, bundles)
-        if cfg.bundling_mode == "medium":
+        if cfg.bundling_mode == "medium" or cfg.classify_documents:
             overview_path = write_corpus_overview(
-                export_dir, cfg.project_name, manifest, bundles
+                export_dir,
+                cfg.project_name,
+                manifest,
+                bundles,
+                bundle_categories=bundle_categories or None,
             )
             emit("overview_written", f"  Wrote {overview_path.name}.", {"path": overview_path})
     else:
@@ -602,6 +649,58 @@ def _prepare_medium_docs(
     return prepared
 
 
+def _bundle_documents_by_category(
+    converted_docs: List[ConvertedDoc],
+    manifest: Manifest,
+    budget: int,
+    bundling_mode: str,
+    heading_level: int,
+    emit: Callable[[str, str, Optional[Dict[str, Any]]], None],
+    warnings: List[str],
+) -> Tuple[List, Dict[str, str]]:
+    """Bundle documents per source-hierarchy tier so categories never co-mingle.
+
+    Documents are grouped by their resolved category, bundled in
+    ``CATEGORY_ORDER`` (policy first, as the governing authority), then the
+    per-tier bundles are concatenated and renumbered with a shared prefix width.
+    Returns the bundle list and a ``{bundle_filename: category}`` map for the
+    corpus overview.
+    """
+    groups: Dict[str, List[ConvertedDoc]] = {}
+    for doc in converted_docs:
+        category = doc.metadata.get("category") or CATEGORY_ORDER[-1]
+        groups.setdefault(category, []).append(doc)
+
+    ordered = [c for c in CATEGORY_ORDER if groups.get(c)]
+    ordered += [c for c in groups if c not in CATEGORY_ORDER]
+
+    all_bundles: List = []
+    bundle_categories: Dict[str, str] = {}
+    for category in ordered:
+        docs = groups[category]
+        if bundling_mode == "medium":
+            docs = _prepare_medium_docs(
+                docs, manifest, budget, heading_level, emit, warnings
+            )
+        tier_bundles = split_into_bundles(docs, budget)
+        for bundle in tier_bundles:
+            all_bundles.append((category, bundle))
+
+    bundles = [bundle for _category, bundle in all_bundles]
+    for index, bundle in enumerate(bundles, start=1):
+        bundle.index = index
+    assign_bundle_prefix_width(bundles)
+    for category, bundle in all_bundles:
+        bundle_categories[bundle.filename] = category
+        emit(
+            "category_bundle",
+            f"  {bundle.filename}: {CATEGORY_LABELS[category]} "
+            f"({bundle.total_tokens:,} tokens).",
+            {"bundle": bundle.filename, "category": category},
+        )
+    return bundles, bundle_categories
+
+
 def _convert_files(
     files: Sequence[ScannedFile],
     reader_ctx: ReaderContext,
@@ -609,13 +708,18 @@ def _convert_files(
     warnings: List[str],
     errors: List[str],
     emit: Callable[[str, str, Optional[Dict[str, Any]]], None],
+    *,
+    classify: bool = False,
+    doc_categories: Optional[Mapping[str, str]] = None,
 ) -> List[ConvertedDoc]:
+    overrides = normalize_overrides(doc_categories) if classify else {}
     converted_docs: List[ConvertedDoc] = []
     for index, scanned in enumerate(files, start=1):
         doc_id = doc_id_for_index(index)
         rel_str = scanned.relative_path.as_posix()
         emit("file_start", f"  Processing {doc_id} {rel_str}...", {"doc_id": doc_id, "path": rel_str})
         result = read_file(scanned, doc_id=doc_id, ctx=reader_ctx)
+        category = resolve_category(rel_str, overrides) if classify else ""
         entry = ManifestEntry(
             doc_id=doc_id,
             source_file=scanned.relative_path.name,
@@ -627,9 +731,15 @@ def _convert_files(
             word_count=result.word_count,
             notes=result.notes,
         )
+        if category:
+            entry.notes = _append_note(entry.notes, f"Category: {CATEGORY_LABELS[category]}")
 
         if result.status == "ok" and result.markdown.strip():
-            doc = make_converted_doc(entry, result.markdown)
+            markdown = result.markdown
+            metadata = {"category": category} if category else None
+            if category == CATEGORY_POLICY and scanned.file_type == "pdf":
+                markdown = pdf_structure.restructure_pdf_markdown(markdown)
+            doc = make_converted_doc(entry, markdown, metadata=metadata)
             entry.token_estimate = doc.token_estimate
             converted_docs.append(doc)
             emit(
